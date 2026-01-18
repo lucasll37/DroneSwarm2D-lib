@@ -322,17 +322,20 @@ class FriendBenchmarkBehavior(BaseBehavior):
     def __init__(self, 
                  friend_activation_threshold_position: float = 0.7,
                  enemy_activation_threshold_position: float = 0.4,
-                 n_clockwise: int = 100):
+                 min_clockwise_steps: int = 20,
+                 max_clockwise_steps: int = 50):
         """
         Args:
             friend_activation_threshold_position: Limiar de intensidade para detecção de amigos.
             enemy_activation_threshold_position: Limiar de intensidade para detecção de inimigos.
-            n_clockwise: Número máximo de steps para movimento circular em cada direção.
+            min_clockwise_steps: Número mínimo de steps para movimento circular em cada direção.
+            max_clockwise_steps: Número máximo de steps para movimento circular em cada direção.
         """
         super().__init__(behavior_type=BehaviorType.COMMON)
         self.friend_activation_threshold_position = friend_activation_threshold_position
         self.enemy_activation_threshold_position = enemy_activation_threshold_position
-        self.n_clockwise = n_clockwise
+        self.min_clockwise_steps = min_clockwise_steps
+        self.max_clockwise_steps = max_clockwise_steps
         
         # Dicionário para armazenar o estado circular de cada drone individualmente
         self._drone_states = {}
@@ -468,7 +471,7 @@ class FriendBenchmarkBehavior(BaseBehavior):
         
         # Caso 2: Se o drone não se comunica, retorna para a distância settings.INITIAL_DISTANCE do PI.
         if settings.MIN_COMMUNICATION_HOLD == 0 and pos.distance_to(settings.INTEREST_POINT_CENTER) > settings.INITIAL_DISTANCE:
-            self._reset_drone_state(drone_id)
+            # self._reset_drone_state(drone_id)
             info = ("HOLD - RETURN", None, None, friends_hold)
             direction = (settings.INTEREST_POINT_CENTER - pos).normalize()
             vel = direction * settings.FRIEND_SPEED
@@ -523,9 +526,13 @@ class FriendBenchmarkBehavior(BaseBehavior):
             if settings.HOLD_SPREAD and len(friends_hold) > 2:    
                 # Verifica se precisa iniciar novo ciclo de movimento circular
                 if drone_state['steps_remaining'] <= 0:
-                    # Sorteia nova quantidade de steps e direção
-                    drone_state['steps_remaining'] = self._rng.integers(0, self.n_clockwise + 1)
-                    drone_state['direction'] = self._rng.choice([1, -1])  # 1: horário, -1: anti-horário
+                    # Sorteia nova quantidade de steps entre min e max (inclusivo) e direção
+                    drone_state['steps_remaining'] = self._rng.integers(
+                        self.min_clockwise_steps, 
+                        self.max_clockwise_steps + 1
+                    )
+                    # drone_state['direction'] = self._rng.choice([1, -1])  # 1: horário, -1: anti-horário
+                    drone_state['direction'] *= -1
                 
                 # Calcula o vetor tangencial para movimento circular
                 radial = pos - settings.INTEREST_POINT_CENTER

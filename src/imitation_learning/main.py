@@ -18,12 +18,11 @@ def main():
     #     buffer_size = 100,
     #     joystick_data_path= "./src/imitation_learning/data/joystick_data"
     # )
-    
-    behavior_behavior = FriendBenchmarkBehavior(n_clockwise=100)
-    
+
+    behavior_behavior = FriendBenchmarkBehavior(min_clockwise_steps = 20, max_clockwise_steps = 50)
+
     env = DroneSwarm2D.AirTrafficEnv(
         mode='human',
-        # friend_behavior=friend_behavior,
         friend_behavior=behavior_behavior,
         enemy_behavior=settings.ENEMY_BEHAVIOR,
         demilitarized_zones=settings.DMZ,
