@@ -428,7 +428,7 @@ class FriendBenchmarkBehavior(BaseBehavior):
         
         if engaged_enemies:
             # Reset do estado circular quando sair do HOLD
-            self._reset_drone_state(drone_id)
+            # self._reset_drone_state(drone_id)
             
             engaged_enemies.sort(key=lambda t: t[0])
             _, chosen_cell, chosen_target_pos = engaged_enemies[0]
@@ -457,7 +457,7 @@ class FriendBenchmarkBehavior(BaseBehavior):
         
         # Caso 1: Se o drone estiver muito próximo do ponto de interesse, permanece parado.
         if pos.distance_to(settings.INTEREST_POINT_CENTER) < settings.EPSILON:
-            self._reset_drone_state(drone_id)
+            # self._reset_drone_state(drone_id)
             info = ("HOLD - WAIT", None, None, friends_hold)
             return info, pygame.math.Vector2(0, 0)
         
@@ -498,7 +498,7 @@ class FriendBenchmarkBehavior(BaseBehavior):
                                                 cell_center, enemy_dir))
                     
             if candidate_intercepts:
-                self._reset_drone_state(drone_id)
+                # self._reset_drone_state(drone_id)
                 
                 candidate_intercepts.sort(key=lambda t: t[0])
                 _, chosen_cell_center, enemy_dir = candidate_intercepts[0]
@@ -555,12 +555,12 @@ class FriendBenchmarkBehavior(BaseBehavior):
                 return info, vel
 
             # Se não houver movimento circular, espera parado
-            self._reset_drone_state(drone_id)
+            # self._reset_drone_state(drone_id)
             info = ("HOLD - WAIT", None, None, friends_hold)
             return info, pygame.math.Vector2(0, 0)
         
         # Caso 4: Se não estiver conectado a pelo menos MIN_COMMUNICATION_HOLD amigos, retorna ao PI.
-        self._reset_drone_state(drone_id)
+        # self._reset_drone_state(drone_id)
         info = ("HOLD - NO ENOUGH COMM", None, None, friends_hold)
         direction = (settings.INTEREST_POINT_CENTER - pos).normalize()
         vel = direction * settings.FRIEND_SPEED
