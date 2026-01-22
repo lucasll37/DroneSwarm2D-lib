@@ -7,14 +7,14 @@ import sys
 from pathlib import Path
 
 import DroneSwarm2D
-settings = DroneSwarm2D.init(config_path="./config/benchmark_formation_asym_m.json", fullscreen=True)
+settings = DroneSwarm2D.init(config_path="./config/behavior_cloning_8198_asym_m.json", fullscreen=True)
 
 # Adiciona o diretório raiz ao Python path
 root_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_dir))
 
 from src.planning.behaviors import FriendCommonBehavior, FriendAEWBehavior, FriendRadarBehavior # <-- PLANNING MODULE
-from src.imitation_learning.behaviors import FriendCommonBehaviorAI, FriendBenchmarkBehavior # <-- IMITATION LEARNING MODULE
+# from src.imitation_learning.behaviors import FriendCommonBehaviorAI, FriendBenchmarkBehavior # <-- IMITATION LEARNING MODULE
 
 
 def persist_episode_result(result: dict, csv_path: str) -> None:
@@ -45,8 +45,8 @@ def main() -> None:
         
     env = DroneSwarm2D.AirTrafficEnv(
         mode=None,
-        friend_behavior=FriendBenchmarkBehavior(),
-        # friend_behavior=FriendCommonBehavior(),
+        # friend_behavior=FriendBenchmarkBehavior(),
+        friend_behavior=FriendCommonBehavior(),
         friend_aew_behavior = FriendAEWBehavior(),
         friend_radar_behavior = FriendRadarBehavior(),
         enemy_behavior=settings.ENEMY_BEHAVIOR,

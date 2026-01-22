@@ -11,8 +11,9 @@ import json
 from datetime import datetime
 import numpy as np
 import pygame
-from DroneSwarm2D.core.utils import pos_to_cell, intercept_direction, can_intercept, load_best_model
+from DroneSwarm2D.core.utils import pos_to_cell, intercept_direction, can_intercept
 from DroneSwarm2D.behaviorsDefault import BaseBehavior, BehaviorType
+from .utils import load_best_model
 
 class FriendCommonBehaviorAI(BaseBehavior):
     def __init__(self, friend_activation_threshold_position: float = 0.7,

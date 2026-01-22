@@ -6,7 +6,7 @@ settings = DroneSwarm2D.init(
 
 from train import test_model
 from data import load_behavior_dataset, setup_finite_dataset_training
-from DroneSwarm2D.core.utils import load_best_model
+from .utils import load_best_model
 
 def main() -> None:
     """
