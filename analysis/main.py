@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import DroneSwarm2D
-settings = DroneSwarm2D.init(config_path="./config/behavior_cloning_8198_asym_m.json", fullscreen=True)
+settings = DroneSwarm2D.init(config_path="./config/behavior_cloning_8198_asym.json", fullscreen=True)
 
 # Adiciona o diretório raiz ao Python path
 root_dir = Path(__file__).resolve().parent.parent
