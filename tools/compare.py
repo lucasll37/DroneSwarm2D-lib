@@ -503,7 +503,7 @@ def violinplot_with_overlap(data, filter_conditions=None, x_col=None, y_col=None
                          palette=["m", "g"], hue2_palette=None,
                          x_order=None, hue2_order=None, ylim_bottom=None, ylim_top=None, 
                          save_fig=False, save_dir="./plots", filename=None,
-                         hemisphere_mode='split', loc='lower right'):
+                         hemisphere_mode='split', loc='lower right', legend_spacing=0.15):  # ADICIONAR legend_spacing
     """
     Cria gráfico com linhas horizontais representando as médias dos grupos
     
@@ -515,8 +515,10 @@ def violinplot_with_overlap(data, filter_conditions=None, x_col=None, y_col=None
         Dicionário para mapear valores da variável hue2 para labels customizados
     hemisphere_mode : str
         'split' - Linhas divididas por hue_col (padrão)
-    hemisphere_gap : float
-        Gap entre hemisférios esquerdo e direito (0.0 = colados, 0.1 = gap visível)
+    loc : str
+        Posição das legendas ('lower right', 'upper right', etc.)
+    legend_spacing : float
+        Distância horizontal entre as duas legendas (padrão: 0.15)
     """
     
     def get_hue2_palette(n_colors):
@@ -737,6 +739,7 @@ def violinplot_with_overlap(data, filter_conditions=None, x_col=None, y_col=None
     ax.set_xticks(range(len(categories)))
     ax.set_xticklabels(categories)
     
+    # Criar legendas lado a lado
     if hue_col:
         hue_groups = sorted(filtered_data[hue_col].unique())
         from matplotlib.lines import Line2D
@@ -751,54 +754,63 @@ def violinplot_with_overlap(data, filter_conditions=None, x_col=None, y_col=None
                     label=custom_label)
             )
         
+        # Mapear loc para bbox_to_anchor base
+        loc_map = {
+            'upper right': (1.0, 1.0),
+            'upper left': (0.0, 1.0),
+            'lower right': (1.0, 0.0),
+            'lower left': (0.0, 0.0),
+            'center right': (1.0, 0.5),
+            'center left': (0.0, 0.5),
+            'upper center': (0.5, 1.0),
+            'lower center': (0.5, 0.0),
+            'center': (0.5, 0.5)
+        }
+        
+        # Obter posição base do loc
+        base_x, base_y = loc_map.get(loc, (1.0, 0.0))
+        
+        # Determinar se as legendas devem ir para esquerda ou direita
+        if 'right' in loc:
+            # Legendas à direita - primeira mais à direita, segunda à esquerda
+            bbox1 = (base_x, base_y)
+            bbox2 = (base_x - legend_spacing, base_y)
+        elif 'left' in loc:
+            # Legendas à esquerda - primeira mais à esquerda, segunda à direita
+            bbox1 = (base_x, base_y)
+            bbox2 = (base_x + legend_spacing, base_y)
+        else:
+            # Centro - distribuir simetricamente
+            bbox1 = (base_x - legend_spacing/2, base_y)
+            bbox2 = (base_x + legend_spacing/2, base_y)
+        
+        # Criar primeira legenda (hue_col)
         legend1 = ax.legend(handles=legend_elements, 
                         title=legend_title or hue_col.replace('_', ' ').title(),
-                        loc=loc,  # REMOVIDO bbox_to_anchor
+                        loc=loc,
+                        bbox_to_anchor=bbox1,
                         frameon=True, facecolor='white', edgecolor='black',
                         fontsize=10)
         legend1.get_title().set_fontweight('bold')
         legend1.get_title().set_fontsize(11)
-        plt.gca().add_artist(legend1)
+        ax.add_artist(legend1)  # IMPORTANTE: adicionar explicitamente
 
-    # Legenda de simulação
-    if hue2_col and hue2_colors:
-        hue2_groups_list = list(hue2_colors.keys())
-        custom_hue2_labels = apply_legend_labels(hue2_groups_list, hue2_legend_labels)
-        
-        hue2_patches = [Patch(color=color, alpha=0.9, label=custom_label) 
-                    for (group, color), custom_label in zip(hue2_colors.items(), custom_hue2_labels)]
-        
-        # Calcular posição da segunda legenda baseada no loc
-        if 'lower' in loc:
-            # Se a primeira está embaixo, colocar a segunda acima
-            if 'right' in loc:
-                legend2_loc = 'center right'
-            elif 'left' in loc:
-                legend2_loc = 'center left'
-            else:
-                legend2_loc = 'upper center'
-        elif 'upper' in loc:
-            # Se a primeira está em cima, colocar a segunda embaixo
-            if 'right' in loc:
-                legend2_loc = 'center right'
-            elif 'left' in loc:
-                legend2_loc = 'center left'
-            else:
-                legend2_loc = 'lower center'
-        else:
-            # Para 'center', 'center left', 'center right'
-            if 'right' in loc:
-                legend2_loc = 'upper right'
-            elif 'left' in loc:
-                legend2_loc = 'upper left'
-            else:
-                legend2_loc = 'upper center'
-        
-        legend2 = ax.legend(handles=hue2_patches,
-                        title=hue2_legend_title or hue2_col.replace('_', ' ').title(),
-                        loc=legend2_loc,  # REMOVIDO bbox_to_anchor fixo
-                        frameon=True, facecolor='white', edgecolor='black')
-        legend2.get_title().set_fontweight('bold')
+        # Legenda de simulação (hue2_col)
+        if hue2_col and hue2_colors:
+            hue2_groups_list = list(hue2_colors.keys())
+            custom_hue2_labels = apply_legend_labels(hue2_groups_list, hue2_legend_labels)
+            
+            hue2_patches = [Patch(color=color, alpha=0.9, label=custom_label) 
+                        for (group, color), custom_label in zip(hue2_colors.items(), custom_hue2_labels)]
+            
+            legend2 = ax.legend(handles=hue2_patches,
+                            title=hue2_legend_title or hue2_col.replace('_', ' ').title(),
+                            loc=loc,
+                            bbox_to_anchor=bbox2,
+                            frameon=True, facecolor='white', edgecolor='black',
+                            fontsize=10)
+            legend2.get_title().set_fontweight('bold')
+            legend2.get_title().set_fontsize(11)
     
     # # Criar legendas
     # if hue_col:
