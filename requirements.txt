@@ -1,19 +1,4 @@
-# CairoSVG==2.8.2
-# imageio[ffmpeg]==2.37.2
-# tensorflow-cpu==2.20.0
-# tensorflow
-# tensorflow[and-cuda]
-# ipykernel==7.1.0
-# matplotlib==3.9.4
-# numpy==2.2.6
-# opencv-python==4.12.0.88
-# pillow==12.1.0
-# pandas==2.3.3
-# pygame==2.6.1
-# scikit-learn==1.8.0
-# scipy==1.16.3
-# seaborn==0.13.2
-
-# tensorflow-cpu==2.20.0
-# tensorflow[and-cuda]
 DroneSwarm2D @ git+https://github.com/lucasll37/DroneSwarm2D-lib.git
+pydot~=4.0.1
+tensorflow-cpu~=2.20.0
+# tensorflow[and-cuda]

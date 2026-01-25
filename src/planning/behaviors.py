@@ -218,8 +218,8 @@ class FriendCommonBehavior(BaseBehavior):
                     
                 vel = direction * settings.FRIEND_SPEED
                     
-                info = ("HOLD - BC", None, None, friends_hold) 
-                # info = ("HOLD - SPREAD", None, None, friends_hold) # debug
+                # info = ("HOLD - BC", None, None, friends_hold) 
+                info = ("HOLD - SPREAD", None, None, friends_hold) # debug
                     
                 return info, vel
 
