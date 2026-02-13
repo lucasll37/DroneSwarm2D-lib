@@ -11,7 +11,7 @@ Example:
     >>> settings = DroneSwarm2D.init("config/scenario_1.json")
     >>> env = DroneSwarm2D.AirTrafficEnv(mode='human')
 """
-from typing import Optional, Any, List, Callable
+from typing import Optional, Any, Callable
 
 __version__ = "0.1.0"
 __author__ = "Lucas"
@@ -27,7 +27,6 @@ DemilitarizedZone: Optional[type] = None  # type: ignore
 CircleDMZ: Optional[type] = None  # type: ignore
 generate_sparse_matrix: Optional[Callable] = None  # type: ignore
 get_friends_hold: Optional[Callable] = None  # type: ignore
-load_best_model: Optional[Callable] = None  # type: ignore
 
 _initialized: bool = False
 
@@ -61,7 +60,7 @@ def init(config_path: Optional[str] = None, fullscreen: bool = True) -> Any:
     """
     global AirTrafficEnv, FriendDrone, EnemyDrone
     global CircleInterestPoint, CircleDMZ
-    global generate_sparse_matrix, get_friends_hold, load_best_model
+    global generate_sparse_matrix, get_friends_hold
     global create_video_from_frames
     global _initialized
     
@@ -81,9 +80,7 @@ def init(config_path: Optional[str] = None, fullscreen: bool = True) -> Any:
     from .core.InterestPoint import CircleInterestPoint as _CircleInterestPoint
     from .core.DemilitarizedZone import CircleDMZ as _CircleDMZ
     from .core.utils import generate_sparse_matrix as _generate_sparse_matrix
-    from .core.utils import get_friends_hold as _get_friends_hold
-    from .core.utils import load_best_model as _load_best_model
-    
+    from .core.utils import get_friends_hold as _get_friends_hold    
     from .tools.create_video import create_video_from_frames as _create_video_from_frames
     
     # Atribuir às variáveis do módulo
@@ -94,7 +91,6 @@ def init(config_path: Optional[str] = None, fullscreen: bool = True) -> Any:
     CircleDMZ = _CircleDMZ
     generate_sparse_matrix = _generate_sparse_matrix
     get_friends_hold = _get_friends_hold
-    load_best_model = _load_best_model
     create_video_from_frames = _create_video_from_frames
     
     _initialized = True
@@ -110,6 +106,5 @@ __all__ = [
     'CircleInterestPoint',
     'CircleDMZ',
     'generate_sparse_matrix',
-    'get_friends_hold',
-    'load_best_model',
+    'get_friends_hold'
 ]

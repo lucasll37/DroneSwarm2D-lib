@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Simulador de enxames de drones defensivos com algoritmos distribuídos"
 readme = "README.md"
 authors = [
-    {name = "Lucas", email = "seu.email@ita.br"}
+    {name = "Lucas", email = "lucas.lima1037@gmail.com"}
 ]
 license = {text = "MIT"}
 requires-python = ">=3.12"
