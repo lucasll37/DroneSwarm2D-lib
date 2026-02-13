@@ -46,7 +46,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["DroneSwarm2D*"]
-exclude = ["app*", "images*", "old_DroneSwarm2D*"]
+exclude = ["app*", "images*"]
 
 [tool.setuptools.package-data]
 DroneSwarm2D = [
