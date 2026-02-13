@@ -31,7 +31,7 @@ pip install --upgrade pip
 #### 4. Instalar a Biblioteca
 
 ```bash
-pip install DroneSwarm2D @ git+https://github.com/lucasll37/DroneSwarm2D-lib.git
+pip install DroneSwarm2D@git+https://github.com/lucasll37/DroneSwarm2D-lib.git
 ```
 
 #### 5. Criar Projeto Exemplo
