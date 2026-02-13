@@ -1,0 +1,87 @@
+/* Elegant PDF Style */
+body {
+  font-family: "Merriweather", Georgia, serif;
+  line-height: 1.8;
+  font-size: 15px;
+  color: #444;
+  background-color: #fbfbfb;
+  padding: 30px;
+}
+
+/* Títulos refinados com sublinhado sutil */
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Merriweather", Georgia, serif;
+  color: #2e2e2e;
+  margin-top: 30px;
+  margin-bottom: 15px;
+  padding-bottom: 5px;
+  border-bottom: 2px solid #dcdcdc;
+}
+
+/* Parágrafos com espaçamento aumentado e alinhamento justificado */
+p {
+  margin-bottom: 20px;
+  text-align: justify;
+}
+
+/* Blocos de código inline com fundo sutil e bordas arredondadas */
+code {
+  background-color: #f2f2f2;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-family: Consolas, "Courier New", monospace;
+  color: #e74c3c;
+}
+
+/* Blocos de código com destaque e barra lateral */
+pre {
+  background-color: #f8f8f8;
+  padding: 15px;
+  border-left: 4px solid #3498db;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: Consolas, "Courier New", monospace;
+  color: #333;
+}
+
+/* Links com sublinhado pontilhado que se destaca ao passar o mouse */
+a {
+  color: #2980b9;
+  text-decoration: none;
+  border-bottom: 1px dotted #2980b9;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* Citações com fundo diferenciado e borda lateral */
+blockquote {
+  margin: 20px 0;
+  padding: 15px 20px;
+  background-color: #f0f0f0;
+  border-left: 5px solid #ccc;
+  font-style: italic;
+  color: #555;
+}
+
+/* Tabelas com layout limpo e cores neutras */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 20px;
+}
+
+table, th, td {
+  border: 1px solid #ddd;
+}
+
+th, td {
+  padding: 10px;
+  text-align: left;
+}
+
+th {
+  background-color: #f4f4f4;
+  color: #333;
+}

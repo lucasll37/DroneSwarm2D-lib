@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "DroneSwarm2D"
+version = "0.1.0"
+description = "Simulador de enxames de drones defensivos com algoritmos distribuídos"
+readme = "README.md"
+authors = [
+    {name = "Lucas", email = "seu.email@ita.br"}
+]
+license = {text = "MIT"}
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+]
+
+dependencies = [
+    "CairoSVG~=2.8.2",           # Permite 2.8.x (bugfixes), não 2.9.0
+    "imageio[ffmpeg]~=2.37.2",   # Permite 2.37.x
+    "ipykernel~=7.1.0",          # Permite 7.1.x
+    "matplotlib~=3.9.4",         # Permite 3.9.x
+    "numpy~=2.2.6",              # Permite 2.2.x
+    "opencv-python~=4.12.0",     # Permite 4.12.x
+    "pandas~=2.3.3",             # Permite 2.3.x
+    "Pillow~=12.1.0",            # Permite 12.1.x
+    "pygame~=2.6.1",             # Permite 2.6.x
+    "scikit-learn~=1.8.0",       # Permite 1.8.x
+    "scipy~=1.16.3",             # Permite 1.16.x
+    "seaborn~=0.13.2"            # Permite 0.13.x
+]
+
+[project.urls]
+"Homepage" = "https://github.com/lucasll37/DroneSwarm2D-bib"
+"Bug Tracker" = "https://github.com/lucasll37/DroneSwarm2D-bib/issues"
+
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["DroneSwarm2D*"]
+exclude = ["app*", "images*", "old_DroneSwarm2D*"]
+
+[tool.setuptools.package-data]
+DroneSwarm2D = [
+    "assets/**/*",
+    "assets/*.*",
+    "templates/**/*",
+    "templates/*.*"
+]
