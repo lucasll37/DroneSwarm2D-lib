@@ -1,6 +1,6 @@
 # DroneSwarm2D: Um Simulador para Estudo de Táticas Defensivas Distribuídas com Enxames de Drones Autônomos
 
-![Banner do Enxame de Drones](./images/centralized.gif)
+![Banner do Enxame de Drones](./images/banner.gif)
 
 ## 🚀 Como Iniciar
 
