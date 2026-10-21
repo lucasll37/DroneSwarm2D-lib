@@ -1,140 +1,131 @@
-"""
-create_video.py
+"""Build an MP4 video from the PNG frames saved by the simulator.
 
-This script reads PNG frames from a specified directory, sorts them by frame number,
-and creates a video (MP4 format) using imageio.
+PT-BR: Gera um vídeo MP4 a partir dos quadros PNG salvos pelo simulador.
+
+Frames are saved by the "Tog. Save Frames" button as
+``./tmp/frames_<timestamp>-<scenario>/frame_<n>.png``. The video is named after
+the scenario: ``<output_dir>/<scenario>.mp4``.
+
+Usage::
+
+    python -m DroneSwarm2D create_video ./tmp/frames_20250101_120000-scenario
+    python -m DroneSwarm2D.tools.create_video        # newest folder in ./tmp
 """
 
-# -----------------------------------------------------------------------------
-# Imports
-# -----------------------------------------------------------------------------
+from __future__ import annotations
+
 import os
+import re
 import shutil
-from typing import Optional
+from typing import List, Optional
+
 import imageio.v2 as imageio
 
-# -----------------------------------------------------------------------------
-# Helper Functions
-# -----------------------------------------------------------------------------
-def get_frame_number(filename: str) -> int:
-    """
-    Extracts the frame number from a filename.
-    
-    Assumes filenames follow the pattern: <prefix>_<number>.png
-    
-    Args:
-        filename (str): The filename to extract the number from.
-        
-    Returns:
-        int: The extracted frame number.
-    """
-    return int(filename.split('_')[1].split('.')[0])
 
-# -----------------------------------------------------------------------------
-# Main Video Creation Function
-# -----------------------------------------------------------------------------
+def get_frame_number(filename: str) -> int:
+    """Extract the frame number from a file name such as ``frame_12.png``.
+
+    Args:
+        filename: File name (``<prefix>_<number>.png``).
+
+    Returns:
+        The frame number.
+
+    Raises:
+        ValueError: If the name contains no number.
+    """
+    try:
+        return int(filename.split("_")[1].split(".")[0])
+    except (IndexError, ValueError):
+        digits = re.findall(r"\d+", filename)
+        if not digits:
+            raise ValueError(f"No frame number in {filename!r}") from None
+        return int(digits[-1])
+
+
+def _sorted_frames(frames_dir: str) -> List[str]:
+    """PNG files of ``frames_dir`` sorted by frame number (unnumbered files are skipped)."""
+    numbered = []
+    for name in os.listdir(frames_dir):
+        if not name.endswith(".png"):
+            continue
+        try:
+            numbered.append((get_frame_number(name), name))
+        except ValueError:
+            print(f"Skipping '{name}': no frame number.")
+    return [name for _, name in sorted(numbered)]
+
+
 def create_video_from_frames(
     frames_dir: str,
     output_dir: str = "./video",
     fps: int = 30,
     codec: str = "libx264",
-    remove_frames: bool = False
+    remove_frames: bool = False,
 ) -> Optional[str]:
-    """
-    Creates a video from PNG frames in a specified directory.
-    
+    """Encode the PNG frames of ``frames_dir`` into ``<output_dir>/<scenario>.mp4``.
+
+    PT-BR: Codifica os quadros PNG de ``frames_dir`` em ``<output_dir>/<cenário>.mp4``.
+
     Args:
-        frames_dir (str): Path to the directory containing PNG frame images.
-        output_dir (str): Directory where the output video will be saved. 
-                         Defaults to "./video".
-        fps (int): Frames per second for the output video. Defaults to 30.
-        codec (str): Video codec to use. Defaults to "libx264".
-        remove_frames (bool): If True, removes the frames directory after 
-                             creating the video. Defaults to False.
-    
+        frames_dir: Directory with ``frame_<n>.png`` files.
+        output_dir: Where to write the video (created if needed).
+        fps: Frames per second.
+        codec: FFmpeg codec.
+        remove_frames: Delete ``frames_dir`` after a successful encoding.
+
     Returns:
-        Optional[str]: Path to the created video file, or None if an error occurred.
+        Path of the video, or ``None`` if there was nothing to encode.
     """
-    # Validate that the frames directory exists
-    if not os.path.exists(frames_dir):
+    if not os.path.isdir(frames_dir):
         print(f"Error: Directory '{frames_dir}' does not exist.")
         return None
-    
-    # Extract the type of scenery from the folder name
-    folder_name = os.path.basename(os.path.normpath(frames_dir))
-    type_of_cenary = folder_name.split("-")[-1]
-    
-    # List all PNG filenames in the frames directory
-    filenames = [fn for fn in os.listdir(frames_dir) if fn.endswith(".png")]
-    
+
+    filenames = _sorted_frames(frames_dir)
     if not filenames:
         print(f"Error: No PNG files found in '{frames_dir}'.")
         return None
-    
-    # Sort filenames by frame number
-    filenames = sorted(filenames, key=get_frame_number)
-    
-    # Ensure output directory exists
+
+    # "frames_<timestamp>-<scenario>" -> "<scenario>"
+    folder_name = os.path.basename(os.path.normpath(frames_dir))
+    scenario = folder_name.split("-", 1)[-1]
+
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Create video writer
-    video_filename = os.path.join(output_dir, f"{type_of_cenary}.mp4")
-    writer = imageio.get_writer(video_filename, fps=fps, codec=codec)
-    
-    # Process each frame and add to the video
-    for fn in filenames:
-        path = os.path.join(frames_dir, fn)
-        try:
-            img = imageio.imread(path)
-            writer.append_data(img)
-        except Exception as e:
-            print(f"Error processing {fn}: {e}")
-            continue
-    
-    writer.close()
+    video_filename = os.path.join(output_dir, f"{scenario}.mp4")
+
+    with imageio.get_writer(video_filename, fps=fps, codec=codec) as writer:
+        for name in filenames:
+            try:
+                writer.append_data(imageio.imread(os.path.join(frames_dir, name)))
+            except Exception as exc:  # A corrupt frame must not abort the whole video.
+                print(f"Error processing {name}: {exc}")
+
     print(f"Video saved as: {video_filename}")
-    
-    # Optionally remove the frames directory
+
     if remove_frames:
         try:
             shutil.rmtree(frames_dir)
             print(f"Frames directory '{frames_dir}' removed.")
-        except Exception as e:
-            print(f"Error removing frames directory: {e}")
-    
+        except OSError as exc:
+            print(f"Error removing frames directory: {exc}")
+
     return video_filename
 
-# -----------------------------------------------------------------------------
-# Entry Point
-# -----------------------------------------------------------------------------
+
 def main() -> None:
-    """
-    Main function for command-line usage.
-    Reads frames from './tmp' directory structure.
-    """
+    """Encode the newest frames folder found in ``./tmp``."""
     tmp_dir = "./tmp"
-    
-    if not os.path.exists(tmp_dir):
+    if not os.path.isdir(tmp_dir):
         print(f"Error: Directory '{tmp_dir}' does not exist.")
         return
-    
-    # Get the first folder in tmp directory
-    folders = os.listdir(tmp_dir)
+
+    folders = sorted(f for f in os.listdir(tmp_dir) if os.path.isdir(os.path.join(tmp_dir, f)))
     if not folders:
         print(f"Error: No folders found in '{tmp_dir}'.")
         return
-    
-    folder = folders[0]
-    frames_dir = os.path.join(tmp_dir, folder)
-    
-    # Create video from frames
-    create_video_from_frames(
-        frames_dir=frames_dir,
-        output_dir="./video",
-        fps=30,
-        codec="libx264",
-        remove_frames=False  # Set to True to remove frames after video creation
-    )
+
+    create_video_from_frames(frames_dir=os.path.join(tmp_dir, folders[-1]), output_dir="./video")
+
 
 if __name__ == "__main__":
     main()

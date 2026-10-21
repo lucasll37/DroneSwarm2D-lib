@@ -8,7 +8,7 @@
 	"ENEMY_BEHAVIOR": "None",
 	"PASSIVE_DETECTION": true,
 	
-	"JOYSTICK": "Enemy",
+	"JOYSTICK": "None",
 	"FRIEND_COUNT": 8,
 	"ENEMY_COUNT": 8,
 	"EPISODES": 5,

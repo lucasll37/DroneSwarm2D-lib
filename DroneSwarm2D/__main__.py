@@ -1,8 +1,5 @@
-# droneswarm2d/__main__.py
-"""
-Entry point para executar DroneSwarm2D como módulo.
-Uso: python -m DroneSwarm2D <comando>
-"""
+"""``python -m DroneSwarm2D <command>`` - see :mod:`DroneSwarm2D.cli`."""
+
 from .cli import main
 
 if __name__ == "__main__":

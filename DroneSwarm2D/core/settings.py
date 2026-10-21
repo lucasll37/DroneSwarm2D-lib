@@ -1,499 +1,339 @@
-# DroneSwarm2D/core/settings.py
-"""
-Gerenciador de configurações do DroneSwarm2D.
+"""Configuration manager for DroneSwarm2D.
 
-Carrega e processa arquivos de configuração JSON, fornecendo acesso global
-às configurações através de um padrão Singleton.
+Loads a JSON scenario file, evaluates its expressions and exposes every key as a
+module-level variable, so the rest of the library can simply do
+``from DroneSwarm2D.core.settings import SIM_WIDTH``.
 
-A configuração deve ser inicializada uma vez no início da aplicação através
-de `settings.initialize()` e depois fica disponível globalmente.
+The configuration is a process-wide singleton: it must be initialised exactly once
+(normally through :func:`DroneSwarm2D.init`) **before** any other module of the
+library is imported, because those modules read the settings at import time.
+
+PT-BR: Gerenciador de configuração. Carrega o JSON do cenário, avalia as
+expressões e expõe cada chave como variável do módulo. É um singleton por
+processo e deve ser inicializado uma única vez (via ``DroneSwarm2D.init``) antes
+de importar os demais módulos da biblioteca.
+
+Config values
+-------------
+* Numbers, booleans, lists and plain strings are used as-is.
+* Strings are evaluated as Python expressions against the keys defined *above*
+  them, e.g. ``"SIM_WIDTH": "int(FULL_WIDTH * 0.7)"``. Strings that fail to
+  evaluate (``"Courier New"``) are kept as strings, and ``"None"`` becomes ``None``.
+* ``FULL_WIDTH`` / ``FULL_HEIGHT`` always come from the display (or from the
+  ``screen_size`` argument), whatever the file says.
+
+.. warning::
+   Expressions are evaluated with :func:`eval`. Only load configuration files you trust.
 
 Example:
     >>> from DroneSwarm2D.core import settings
     >>> settings.initialize("config/scenario_1.json")
-    >>> width = settings.SIM_WIDTH
-    >>> center = settings.CENTER
+    >>> settings.SIM_WIDTH, settings.CENTER
 """
 
-import os
-import json
+from __future__ import annotations
+
 import glob
-from typing import Dict, Any, List, Optional
-import pygame
+import json
+import os
+import warnings
+from typing import Any, Dict, List, Optional, Tuple
+
+# Silence audio before pygame initialises: the simulator never plays sound and a
+# missing audio device must not crash headless runs. Users can still override it.
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+import pygame  # noqa: E402  (must come after the environment tweak above)
+
+#: Screen size used for headless runs when ``screen_size`` is not given.
+DEFAULT_HEADLESS_SIZE: Tuple[int, int] = (1920, 1080)
 
 
 class ConfigManager:
-    """
-    Gerenciador de configurações do simulador (Singleton).
-    
-    A configuração é inicializada uma vez e depois acessada globalmente
-    através de variáveis do módulo ou pela instância singleton.
-    
+    """Singleton that loads, evaluates and publishes the scenario configuration.
+
+    PT-BR: Singleton que carrega, avalia e publica a configuração do cenário.
+
     Attributes:
-        config_path: Caminho para o arquivo de configuração JSON carregado
-        config_name: Nome do arquivo de configuração (sem extensão)
-        screen: Superfície pygame principal
-        clock: Relógio pygame para controle de FPS
-        
-    Note:
-        Esta classe implementa o padrão Singleton - apenas uma instância
-        pode existir por vez.
+        config_path: Absolute path of the loaded JSON file.
+        config_name: File name without extension (used as the scenario name).
+        screen: Main pygame display surface.
+        clock: pygame clock used to cap the frame rate.
+        headless: Whether the display is a dummy (off-screen) one.
     """
-    
-    _instance: Optional['ConfigManager'] = None
+
+    _instance: Optional[ConfigManager] = None
     _initialized: bool = False
-    
-    def __new__(cls, config_path: Optional[str] = None, fullscreen: bool = True) -> 'ConfigManager':
-        """
-        Garante que apenas uma instância exista (Singleton).
-        
-        Args:
-            config_path: Caminho para arquivo .json de configuração
-            fullscreen: Se True, cria janela em tela cheia
-            
-        Returns:
-            Instância única do ConfigManager
-        """
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> ConfigManager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
-    def __init__(self, config_path: Optional[str] = None, fullscreen: bool = True) -> None:
-        """
-        Inicializa o gerenciador de configurações.
-        
+
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        fullscreen: bool = True,
+        headless: bool = False,
+        screen_size: Optional[Tuple[int, int]] = None,
+    ) -> None:
+        """Load the configuration (only on the first call).
+
         Args:
-            config_path: Caminho para arquivo .json de configuração.
-                        Se None, busca o primeiro .json em config/
-            fullscreen: Se True, cria janela pygame em tela cheia
-            
+            config_path: Path to the JSON file. If ``None``, the first ``*.json``
+                found in a ``config/`` directory is used.
+            fullscreen: Open the pygame window in full-screen mode. Ignored when
+                ``headless`` is true.
+            headless: Use SDL's dummy video driver so no window is opened. Useful
+                for batch experiments, CI and servers without a display.
+            screen_size: ``(width, height)`` overriding ``FULL_WIDTH`` and
+                ``FULL_HEIGHT``. Defaults to the display size, or to
+                :data:`DEFAULT_HEADLESS_SIZE` in headless mode.
+
         Raises:
-            FileNotFoundError: Se o arquivo de configuração não for encontrado
-            
-        Note:
-            Evita reinicialização usando atributo de classe _initialized
+            FileNotFoundError: If the configuration file does not exist.
         """
-        # Evita reinicialização - USAR ATRIBUTO DE CLASSE
         if ConfigManager._initialized:
+            requested = os.path.abspath(config_path) if config_path else None
+            if requested and requested != self.config_path:
+                warnings.warn(
+                    f"DroneSwarm2D is already initialised with '{self.config_path}'; "
+                    f"ignoring '{requested}'. The configuration can only be loaded once "
+                    "per process.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
             return
-        
-        # Inicializar pygame se necessário
+
+        self.headless: bool = headless
+        if headless:
+            self._enable_dummy_video_driver()
+            if screen_size is None:
+                screen_size = DEFAULT_HEADLESS_SIZE
+
         if not pygame.get_init():
             pygame.init()
-        
-        # Resolver caminho do arquivo de configuração
+
         if config_path is None:
             config_path = self._find_default_config()
         else:
             config_path = os.path.abspath(config_path)
-            
+
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Arquivo de configuração não encontrado: {config_path}")
-        
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+
         self.config_path: str = config_path
         self.config_name: str = os.path.splitext(os.path.basename(config_path))[0]
-        
-        print(f"[ConfigManager] Carregando '{self.config_name}' de: {self.config_path}")
-        
-        # Carregar e processar configurações
+
+        print(f"[ConfigManager] Loading '{self.config_name}' from: {self.config_path}")
+
         self._config: Dict[str, Any] = {}
-        self._load_config()
+        self._load_config(screen_size)
         self._compute_derived_values()
-        
-        # Criar tela e relógio pygame
-        self._setup_display(fullscreen)
-        
-        # Exportar para o namespace do módulo
+        self._setup_display(fullscreen and not headless)
         self._export_to_module()
-        
-        # Marcar como inicializado NA CLASSE
+
         ConfigManager._initialized = True
-        print(f"[ConfigManager] Configuração inicializada com {len(self._config)} parâmetros")
-    
-    def _find_default_config(self) -> str:
-        """
-        Busca o primeiro arquivo .json no diretório config/.
-        
-        Returns:
-            Caminho absoluto para o primeiro arquivo .json encontrado
-            
+        print(f"[ConfigManager] Configuration ready with {len(self._config)} parameters")
+
+    # ------------------------------------------------------------------ loading
+
+    @staticmethod
+    def _enable_dummy_video_driver() -> None:
+        """Switch SDL to the off-screen ``dummy`` video driver."""
+        if os.environ.get("SDL_VIDEODRIVER") == "dummy":
+            return
+        os.environ["SDL_VIDEODRIVER"] = "dummy"
+        # If the display was already initialised with a real driver, restart it.
+        if pygame.display.get_init():
+            pygame.display.quit()
+            pygame.display.init()
+
+    @staticmethod
+    def _find_default_config() -> str:
+        """Return the first ``*.json`` file found in a ``config/`` directory.
+
         Raises:
-            FileNotFoundError: Se nenhum arquivo .json for encontrado
-            
-        Note:
-            Tenta múltiplos caminhos relativos comuns
+            FileNotFoundError: If no candidate file exists.
         """
-        # Tentar encontrar o diretório config relativo ao módulo
-        module_dir: str = os.path.dirname(__file__)
-        
-        # Tentar diferentes caminhos possíveis
+        module_dir = os.path.dirname(__file__)
         possible_paths: List[str] = [
             os.path.join(module_dir, "../../config"),
             os.path.join(module_dir, "../config"),
             os.path.join(os.getcwd(), "config"),
         ]
-        
         for config_dir in possible_paths:
             config_dir = os.path.abspath(config_dir)
             if os.path.exists(config_dir):
-                json_paths: List[str] = sorted(glob.glob(os.path.join(config_dir, "*.json")))
+                json_paths = sorted(glob.glob(os.path.join(config_dir, "*.json")))
                 if json_paths:
                     return json_paths[0]
-        
-        raise FileNotFoundError(
-            f"Nenhum arquivo .json encontrado. Procurado em: {possible_paths}"
-        )
-    
-    def _load_config(self) -> None:
-        """
-        Carrega e processa o arquivo JSON de configuração.
-        
-        Este método:
-        1. Lê o arquivo JSON
-        2. Obtém informações do display pygame
-        3. Processa strings com eval() para expressões Python
-        4. Processa listas recursivamente
-        
-        Note:
-            Usa eval() com namespace limitado para segurança
-        """
-        with open(self.config_path, "r", encoding="utf-8") as f:
+
+        raise FileNotFoundError(f"No .json configuration found. Searched: {possible_paths}")
+
+    def _evaluate(self, value: Any) -> Any:
+        """Evaluate a string as an expression over the keys loaded so far."""
+        if not isinstance(value, str):
+            return value
+        try:
+            return eval(value, {}, self._config)  # noqa: S307 - trusted config files
+        except Exception:
+            return value
+
+    def _load_config(self, screen_size: Optional[Tuple[int, int]] = None) -> None:
+        """Read the JSON file and evaluate its values in declaration order."""
+        with open(self.config_path, encoding="utf-8") as f:
             raw: Dict[str, Any] = json.load(f)
-        
-        # Override dimensões da tela com informações do display
-        display_info = pygame.display.Info()
-        raw["FULL_WIDTH"] = display_info.current_w
-        raw["FULL_HEIGHT"] = display_info.current_h
-        
-        # Processar cada chave do JSON
-        for key, val in raw.items():
-            if isinstance(val, str):
-                # Tentar avaliar strings como expressões Python
-                try:
-                    self._config[key] = eval(val, {}, self._config)
-                except Exception:
-                    # Se falhar, manter como string
-                    self._config[key] = val
-            elif isinstance(val, list):
-                # Processar listas recursivamente
-                lst: List[Any] = []
-                for item in val:
-                    if isinstance(item, str):
-                        try:
-                            lst.append(eval(item, {}, self._config))
-                        except Exception:
-                            lst.append(item)
-                    else:
-                        lst.append(item)
-                self._config[key] = lst
-            else:
-                self._config[key] = val
-    
-    def _compute_derived_values(self) -> None:
-        """
-        Calcula valores derivados das configurações base.
-        
-        Valores derivados incluem:
-        - INTEREST_POINT_CENTER: Centro do ponto de interesse
-        - CENTER: Alias para o centro
-        - TYPE_OF_SCENARIO: Nome do cenário
-        - ENEMY_BEHAVIOR: Processamento de comportamento None
-        - DMZ: Processamento de zonas desmilitarizadas
-        """
-        # Centro do ponto de interesse
-        self._config["INTEREST_POINT_CENTER"] = pygame.math.Vector2(
-            self._config["SIM_WIDTH"] / 2,
-            self._config["SIM_HEIGHT"] / 2
-        )
-        
-        self._config["CENTER"] = self._config["INTEREST_POINT_CENTER"].copy()
-        self._config["TYPE_OF_SCENARIO"] = self.config_name
-        
-        # Processar ENEMY_BEHAVIOR
-        if "ENEMY_BEHAVIOR" in self._config:
-            behavior = self._config["ENEMY_BEHAVIOR"]
-            self._config["ENEMY_BEHAVIOR"] = None if behavior == "None" else behavior
-        
-        # Processar zonas desmilitarizadas (DMZ)
-        if "DMZ" in self._config:
-            dmz_list: List[tuple[float, float, int]] = []
-            for expr_x, expr_y, radius in self._config["DMZ"]:
-                x: float = float(eval(str(expr_x), {}, self._config))
-                y: float = float(eval(str(expr_y), {}, self._config))
-                r: int = int(radius)
-                dmz_list.append((x, y, r))
-            self._config["DMZ"] = dmz_list
-    
-    def _setup_display(self, fullscreen: bool) -> None:
-        """
-        Configura a janela pygame e o relógio.
-        
-        Args:
-            fullscreen: Se True, cria janela em modo fullscreen
-            
-        Note:
-            Define self.screen e self.clock como atributos da instância
-        """
-        width: int = self._config["FULL_WIDTH"]
-        height: int = self._config["FULL_HEIGHT"]
-        
-        if fullscreen:
-            self.screen: pygame.Surface = pygame.display.set_mode(
-                (width, height),
-                pygame.FULLSCREEN
-            )
+
+        if screen_size is not None:
+            width, height = int(screen_size[0]), int(screen_size[1])
         else:
-            self.screen = pygame.display.set_mode((width, height))
-        
+            display_info = pygame.display.Info()
+            width, height = display_info.current_w, display_info.current_h
+        raw["FULL_WIDTH"] = width
+        raw["FULL_HEIGHT"] = height
+
+        for key, val in raw.items():
+            if isinstance(val, list):
+                self._config[key] = [self._evaluate(item) for item in val]
+            else:
+                self._config[key] = self._evaluate(val)
+
+    def _compute_derived_values(self) -> None:
+        """Compute values that depend on others (centre, scenario name, DMZs)."""
+        cfg = self._config
+        cfg["INTEREST_POINT_CENTER"] = pygame.math.Vector2(cfg["SIM_WIDTH"] / 2, cfg["SIM_HEIGHT"] / 2)
+        cfg["CENTER"] = cfg["INTEREST_POINT_CENTER"].copy()
+        cfg["TYPE_OF_SCENARIO"] = self.config_name
+
+        if "ENEMY_BEHAVIOR" in cfg:
+            behavior = cfg["ENEMY_BEHAVIOR"]
+            cfg["ENEMY_BEHAVIOR"] = None if behavior == "None" else behavior
+
+        if "DMZ" in cfg:
+            dmz_list: List[Tuple[float, float, int]] = []
+            for expr_x, expr_y, radius in cfg["DMZ"]:
+                x = float(eval(str(expr_x), {}, cfg))  # noqa: S307
+                y = float(eval(str(expr_y), {}, cfg))  # noqa: S307
+                dmz_list.append((x, y, int(radius)))
+            cfg["DMZ"] = dmz_list
+
+    def _setup_display(self, fullscreen: bool) -> None:
+        """Create the pygame window (or off-screen surface) and the clock."""
+        size = (self._config["FULL_WIDTH"], self._config["FULL_HEIGHT"])
+        flags = pygame.FULLSCREEN if fullscreen else 0
+        self.screen: pygame.Surface = pygame.display.set_mode(size, flags)
         self.clock: pygame.time.Clock = pygame.time.Clock()
-    
+
     def _export_to_module(self) -> None:
-        """
-        Exporta todas as configurações como variáveis do módulo.
-        
-        Isso permite o uso de: `from settings import SIM_WIDTH`
-        
-        Note:
-            Define __all__ no módulo para suportar `from settings import *`
-        """
+        """Publish every key (plus ``screen`` and ``clock``) as module globals."""
         import sys
+
         module = sys.modules[__name__]
-        
-        # Exportar todas as configurações como variáveis do módulo
         for key, value in self._config.items():
             setattr(module, key, value)
-        
-        # Exportar também screen e clock
-        setattr(module, 'screen', self.screen)
-        setattr(module, 'clock', self.clock)
-        
-        # IMPORTANTE: Definir __all__ para que "from settings import *" funcione
-        all_exports: List[str] = list(self._config.keys()) + ['screen', 'clock']
-        setattr(module, '__all__', all_exports)
-    
+        module.screen = self.screen
+        module.clock = self.clock
+        module.__all__ = list(self._config.keys()) + ["screen", "clock"]
+
+    # ------------------------------------------------------------------- access
+
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Obtém valor de configuração por chave.
-        
-        Args:
-            key: Nome da configuração
-            default: Valor padrão se a chave não existir
-            
-        Returns:
-            Valor da configuração ou default
-            
-        Example:
-            >>> config = ConfigManager.get_instance()
-            >>> width = config.get('SIM_WIDTH', 800)
-        """
+        """Return ``key`` or ``default`` if it is not defined."""
         return self._config.get(key, default)
-    
+
     def __getattr__(self, name: str) -> Any:
-        """
-        Permite acesso direto aos atributos de configuração.
-        
-        Args:
-            name: Nome do atributo
-            
-        Returns:
-            Valor da configuração
-            
-        Raises:
-            AttributeError: Se a configuração não existir
-            
-        Example:
-            >>> config = ConfigManager.get_instance()
-            >>> width = config.SIM_WIDTH
-        """
-        if name.startswith('_'):
+        if name.startswith("_"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-        
         if name in self._config:
             return self._config[name]
-        
-        raise AttributeError(
-            f"Configuração '{name}' não encontrada em {self.config_path}"
-        )
-    
+        raise AttributeError(f"Setting '{name}' not found in {self.config_path}")
+
     def __getitem__(self, key: str) -> Any:
-        """
-        Permite acesso via subscript.
-        
-        Args:
-            key: Nome da configuração
-            
-        Returns:
-            Valor da configuração
-            
-        Example:
-            >>> config = ConfigManager.get_instance()
-            >>> width = config['SIM_WIDTH']
-        """
         return self._config[key]
-    
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._config
+
     def keys(self) -> List[str]:
-        """
-        Retorna lista de chaves disponíveis.
-        
-        Returns:
-            Lista com nomes de todas as configurações
-        """
+        """Return the names of all loaded settings."""
         return list(self._config.keys())
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Retorna cópia do dicionário de configurações.
-        
-        Returns:
-            Dicionário com todas as configurações
-        """
+        """Return a shallow copy of all loaded settings."""
         return self._config.copy()
-    
+
     def __repr__(self) -> str:
-        """
-        Representação em string do ConfigManager.
-        
-        Returns:
-            String descritiva do gerenciador
-        """
         return f"ConfigManager(config='{self.config_name}', params={len(self._config)})"
-    
+
     @classmethod
     def is_initialized(cls) -> bool:
-        """
-        Verifica se o ConfigManager já foi inicializado.
-        
-        Returns:
-            True se já foi inicializado, False caso contrário
-        """
+        """Return whether the configuration was already loaded."""
         return cls._initialized
-    
+
     @classmethod
-    def get_instance(cls) -> Optional['ConfigManager']:
-        """
-        Retorna a instância singleton, se existir.
-        
-        Returns:
-            Instância do ConfigManager ou None se não inicializado
-        """
+    def get_instance(cls) -> Optional[ConfigManager]:
+        """Return the singleton instance, or ``None`` before initialisation."""
         return cls._instance
 
 
 # -----------------------------------------------------------------------------
-# Funções auxiliares para inicialização e acesso
+# Module-level helpers
 # -----------------------------------------------------------------------------
 
-def initialize(config_path: Optional[str] = None, fullscreen: bool = True) -> ConfigManager:
+def initialize(
+    config_path: Optional[str] = None,
+    fullscreen: bool = True,
+    headless: bool = False,
+    screen_size: Optional[Tuple[int, int]] = None,
+) -> ConfigManager:
+    """Load the configuration. Call once, at the start of the application.
+
+    PT-BR: Carrega a configuração. Chame uma única vez, no início da aplicação.
+
+    See :class:`ConfigManager` for the meaning of the arguments.
     """
-    Inicializa a configuração do framework.
-    
-    Deve ser chamada uma vez no início da aplicação (main).
-    
-    Args:
-        config_path: Caminho para o arquivo de configuração JSON
-        fullscreen: Se True, cria janela em tela cheia
-        
-    Returns:
-        Instância do ConfigManager
-        
-    Example:
-        >>> # No main.py
-        >>> from DroneSwarm2D.core import settings
-        >>> settings.initialize("config/scenario_1.json")
-    """
-    return ConfigManager(config_path, fullscreen)
+    return ConfigManager(config_path, fullscreen, headless=headless, screen_size=screen_size)
 
 
 def get_config() -> ConfigManager:
-    """
-    Retorna a instância do ConfigManager.
-    
-    Returns:
-        Instância do ConfigManager
-        
+    """Return the loaded :class:`ConfigManager`.
+
     Raises:
-        RuntimeError: Se initialize() não foi chamado ainda
-        
-    Example:
-        >>> # Em qualquer módulo do framework
-        >>> from DroneSwarm2D.core import settings
-        >>> config = settings.get_config()
-        >>> width = config.SIM_WIDTH
+        RuntimeError: If :func:`initialize` was not called yet.
     """
     if not ConfigManager.is_initialized():
         raise RuntimeError(
-            "ConfigManager não foi inicializado! "
-            "Chame settings.initialize() no início da aplicação."
+            "ConfigManager is not initialised! Call DroneSwarm2D.init() "
+            "(or settings.initialize()) at the start of the application."
         )
     return ConfigManager.get_instance()
 
 
 def is_initialized() -> bool:
-    """
-    Verifica se a configuração foi inicializada.
-    
-    Returns:
-        True se inicializado, False caso contrário
-    """
+    """Return whether the configuration was already loaded."""
     return ConfigManager.is_initialized()
 
 
-# -----------------------------------------------------------------------------
-# __getattr__ para imports individuais
-# -----------------------------------------------------------------------------
-
 def __getattr__(name: str) -> Any:
-    """
-    Permite importação de variáveis individuais após inicialização.
-    
-    Suporta tanto "from settings import *" quanto "from settings import VAR"
-    
-    Args:
-        name: Nome da variável a ser importada
-        
-    Returns:
-        Valor da configuração
-        
-    Raises:
-        AttributeError: Se o atributo não existir ou ConfigManager não foi inicializado
-        
-    Example:
-        >>> from DroneSwarm2D.core.settings import SIM_WIDTH, CENTER
-        >>> from DroneSwarm2D.core.settings import *
-    """
-    # Lista de atributos especiais do Python (ignorar sem erro)
-    special_attrs: set = {
-        '__path__', '__file__', '__cached__', '__loader__',
-        '__spec__', '__package__', '__name__', '__doc__',
-        '__builtins__', '__all__', '__dict__', '__class__',
-        '__annotations__', '__wrapped__',
-    }
-    
-    # Ignorar atributos especiais
-    if name in special_attrs or (name.startswith('__') and name.endswith('__')):
+    """Resolve ``from settings import NAME`` lazily, with a helpful error."""
+    if name.startswith("__") and name.endswith("__"):
         raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
-    
-    # Verificar inicialização
+
     if not ConfigManager.is_initialized():
         raise RuntimeError(
-            f"ConfigManager não foi inicializado! "
-            f"Tentando acessar: '{name}'\n"
-            f"Solução: Chame settings.initialize() no início do main.py"
+            f"ConfigManager is not initialised (while accessing '{name}').\n"
+            "Fix: call DroneSwarm2D.init('path/to/config.json') before importing "
+            "other DroneSwarm2D modules."
         )
-    
+
     config = ConfigManager.get_instance()
-    
-    # Tentar pegar do _config
     if name in config._config:
         return config._config[name]
-    
-    # Tentar pegar screen ou clock
-    if name == 'screen':
+    if name == "screen":
         return config.screen
-    if name == 'clock':
+    if name == "clock":
         return config.clock
-    
-    raise AttributeError(
-        f"Configuração '{name}' não encontrada.\n"
-        f"Disponíveis: {', '.join(list(config._config.keys())[:10])}..."
-    )
+
+    available = ", ".join(list(config._config.keys())[:10])
+    raise AttributeError(f"Setting '{name}' not found.\nAvailable: {available}...")

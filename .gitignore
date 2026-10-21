@@ -51,3 +51,14 @@ experiments/
 results/
 data/
 models/
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Simulator outputs (frames, videos, Tacview exports, projects created by `init`)
+tmp/
+video/
+output/
+/droneSwarm2D-project/

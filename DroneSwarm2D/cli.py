@@ -1,185 +1,125 @@
-# droneswarm2d/cli.py
+"""Command-line interface: ``python -m DroneSwarm2D <command>``.
+
+PT-BR: Interface de linha de comando: ``python -m DroneSwarm2D <comando>``.
+
+Commands:
+    init          Create a starter project (default when no command is given).
+    create_video  Encode saved PNG frames into an MP4 video.
 """
-Interface de linha de comando para DroneSwarm2D.
-Fornece comandos para inicializar projetos exemplo e criar vídeos a partir de frames.
-"""
+
+from __future__ import annotations
+
 import argparse
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+
+from . import __version__
 from .tools.create_video import create_video_from_frames
 
+
 def get_template_dir() -> Path:
-    """
-    Retorna o diretório de templates da biblioteca.
-    
-    Returns:
-        Path: Caminho para o diretório de templates.
-    """
+    """Directory holding the project templates shipped with the package."""
     return Path(__file__).parent / "templates"
 
 
 def init_project(
-    project_name: str = "droneSwarm2D-project", 
-    template: str = "droneSwarm2D-project"
+    project_name: str = "droneSwarm2D-project",
+    template: str = "droneSwarm2D-project",
 ) -> bool:
-    """
-    Inicializa um novo projeto DroneSwarm2D.
-    
-    Copia a estrutura de template para um novo diretório com o nome especificado.
-    Se o diretório já existir, retorna False sem fazer alterações.
-    
+    """Copy a project template into ``./<project_name>``.
+
+    PT-BR: Copia um template de projeto para ``./<project_name>``.
+
     Args:
-        project_name: Nome do projeto/diretório a ser criado.
-        template: Tipo de template a ser usado (ex: 'basic', 'advanced').
-        
+        project_name: Name of the directory to create (must not exist).
+        template: Template name (a directory inside ``DroneSwarm2D/templates``).
+
     Returns:
-        bool: True se o projeto foi criado com sucesso, False caso contrário.
-        
-    Example:
-        >>> init_project("meu_projeto", "basic")
-        True
+        ``True`` on success, ``False`` otherwise (an error message is printed).
     """
-    # Criar diretório do projeto
-    project_path: Path = Path.cwd() / project_name
-    
+    project_path = Path.cwd() / project_name
     if project_path.exists():
-        print(f"\n❌ Erro: Diretório '{project_name}' já existe!\n")
+        print(f"\n❌ Error: directory '{project_name}' already exists!\n")
         return False
-    
-    # Localizar diretório de templates
-    package_dir: Path = Path(__file__).parent / "templates"
-    template_dir: Path = package_dir / template
-    
-    if not template_dir.exists():
-        print(f"\n❌ Erro: Template '{template}' não encontrado em {package_dir}!\n")
+
+    template_dir = get_template_dir() / template
+    if not template_dir.is_dir():
+        print(f"\n❌ Error: template '{template}' not found in {get_template_dir()}!\n")
         return False
-        
-    print(f"\n📁 Criando projeto '{project_name}'...")
-    
+
+    print(f"\n📁 Creating project '{project_name}'...")
     try:
-        shutil.copytree(template_dir, project_path)
-        print(f"✅ Projeto criado com sucesso em: {project_path}")
-        print(f"\n📝 Próximos passos:")
-        print(f"\tcd {project_name}\n")
-        return True
-        
-    except Exception as e:
-        print(f"\n❌ Erro ao criar projeto: {e}\n")
+        shutil.copytree(template_dir, project_path, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    except OSError as exc:
+        print(f"\n❌ Error while creating the project: {exc}\n")
         return False
+
+    print(f"✅ Project created at: {project_path}")
+    print("\n📝 Next steps:")
+    print(f"\tcd {project_name}")
+    print("\tpython src/main.py\n")
+    return True
 
 
 def create_video_command(args: argparse.Namespace) -> None:
-    """
-    Executa o comando create_video.
-    
-    Args:
-        args: Argumentos parseados do argparse contendo path, output_dir, fps, codec e remove_frames.
-    """    
-    print(f"\n🎬 Criando vídeo a partir dos frames em: {args.path}")
-    
+    """Run the ``create_video`` command and exit with its status."""
+    print(f"\n🎬 Creating video from the frames in: {args.path}")
     video_path = create_video_from_frames(
         frames_dir=args.path,
         output_dir=args.output_dir,
         fps=args.fps,
         codec=args.codec,
-        remove_frames=args.remove_frames
+        remove_frames=args.remove_frames,
     )
-    
     if video_path:
-        print(f"✅ Vídeo criado com sucesso: {video_path}\n")
+        print(f"✅ Video created: {video_path}\n")
         sys.exit(0)
-    else:
-        print("\n❌ Erro: Falha ao criar o vídeo.\n")
-        sys.exit(1)
+    print("\n❌ Error: could not create the video.\n")
+    sys.exit(1)
 
 
-def main() -> None:
-    """
-    Função principal da CLI com suporte a múltiplos comandos.
-    
-    Comandos disponíveis:
-        - init: Inicializa um novo projeto DroneSwarm2D
-        - create_video: Cria um vídeo a partir de frames PNG
-    """
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser of the CLI."""
     parser = argparse.ArgumentParser(
-        prog='DroneSwarm2D',
-        description='DroneSwarm2D - Simulação de Enxame de Drones Defensivos'
+        prog="DroneSwarm2D",
+        description="DroneSwarm2D - defensive drone swarm simulator",
     )
-    
-    subparsers = parser.add_subparsers(dest='command', help='Comandos disponíveis')
-    
-    # Subcomando: init
-    init_parser = subparsers.add_parser(
-        'init',
-        help='Inicializa um novo projeto DroneSwarm2D'
-    )
-    init_parser.add_argument(
-        '--name',
-        type=str,
-        default='droneSwarm2D-project',
-        help='Nome do projeto (default: droneSwarm2D-project)'
-    )
-    init_parser.add_argument(
-        '--template',
-        type=str,
-        default='droneSwarm2D-project',
-        help='Tipo de template (default: droneSwarm2D-project)'
-    )
-    
-    # Subcomando: create_video
-    video_parser = subparsers.add_parser(
-        'create_video',
-        help='Cria um vídeo a partir de frames PNG'
-    )
-    video_parser.add_argument(
-        'path',
-        type=str,
-        help='Caminho para o diretório contendo os frames PNG'
-    )
-    video_parser.add_argument(
-        '--output-dir',
-        type=str,
-        default='./video',
-        help='Diretório onde o vídeo será salvo (default: ./video)'
-    )
-    video_parser.add_argument(
-        '--fps',
-        type=int,
-        default=30,
-        help='Frames por segundo do vídeo (default: 30)'
-    )
-    video_parser.add_argument(
-        '--codec',
-        type=str,
-        default='libx264',
-        help='Codec de vídeo a ser usado (default: libx264)'
-    )
-    video_parser.add_argument(
-        '--remove-frames',
-        action='store_true',
-        help='Remove o diretório de frames após criar o vídeo'
-    )
-    
-    # Parse dos argumentos
-    args = parser.parse_args()
-    
-    # Se nenhum comando foi fornecido, executa init com valores padrão (comportamento original)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    init_parser = subparsers.add_parser("init", help="Create a starter DroneSwarm2D project")
+    init_parser.add_argument("--name", default="droneSwarm2D-project",
+                             help="Project directory name (default: droneSwarm2D-project)")
+    init_parser.add_argument("--template", default="droneSwarm2D-project",
+                             help="Template to use (default: droneSwarm2D-project)")
+
+    video_parser = subparsers.add_parser("create_video", help="Create an MP4 video from PNG frames")
+    video_parser.add_argument("path", help="Directory containing the PNG frames")
+    video_parser.add_argument("--output-dir", default="./video", help="Output directory (default: ./video)")
+    video_parser.add_argument("--fps", type=int, default=30, help="Frames per second (default: 30)")
+    video_parser.add_argument("--codec", default="libx264", help="Video codec (default: libx264)")
+    video_parser.add_argument("--remove-frames", action="store_true",
+                              help="Delete the frames directory after creating the video")
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Entry point of ``python -m DroneSwarm2D``."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
     if args.command is None:
-        print("\n📦 Nenhum comando especificado. Executando 'init' com valores padrão...\n")
+        print("\n📦 No command given. Running 'init' with the default options...\n")
         init_project()
         return
-    
-    # Executa o comando apropriado
-    if args.command == 'init':
-        success = init_project(project_name=args.name, template=args.template)
-        sys.exit(0 if success else 1)
-        
-    elif args.command == 'create_video':
+
+    if args.command == "init":
+        sys.exit(0 if init_project(project_name=args.name, template=args.template) else 1)
+    elif args.command == "create_video":
         create_video_command(args)
-    
-    else:
+    else:  # pragma: no cover - argparse rejects unknown commands
         parser.print_help()
         sys.exit(1)
 

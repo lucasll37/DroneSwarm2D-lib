@@ -1,436 +1,190 @@
+"""Utility functions: grid geometry, interception maths, matrix helpers and I/O.
+
+PT-BR: Funções utilitárias: geometria da grade, cálculo de interceptação,
+utilidades de matrizes, conversão geográfica e carregamento de SVG.
+
+Contents:
+    * Grid helpers: :func:`pos_to_cell`, :func:`cell_center`, :func:`active_cells`.
+    * Interception: :func:`intercept_direction`, :func:`can_intercept`.
+    * Strategy helper: :func:`get_friends_hold`.
+    * Matrices: :func:`generate_sparse_matrix`, :func:`smooth_matrix_with_kernel_10x10`.
+    * Conversions / I/O: :func:`sim_to_geo`, :func:`load_svg_as_surface`.
+    * Debug plotting: :func:`plot_individual_states_matplotlib`.
+
+The drawing helpers ``draw_dashed_circle`` and ``draw_dashed_line`` now live in
+:mod:`DroneSwarm2D.core.rendering` and are re-exported here.
 """
-utils.py
 
-Fornece funções utilitárias para visualização da simulação, processamento de matrizes,
-conversão de coordenadas e cálculos diversos.
+from __future__ import annotations
 
-Este módulo contém:
-- Funções de desenho (círculos tracejados, linhas tracejadas)
-- Processamento de matrizes com kernels Gaussianos
-- Conversão entre coordenadas de simulação e geográficas
-- Carregamento de SVG
-- Cálculos de interceptação e busca
-- Geração de matrizes esparsas
-"""
-
-# Standard libraries
+import io
 import math
 import random
-import io
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Tuple
 
-# import re
-# import sys
-from typing import Tuple, Dict, Optional, Any, Callable
-# from functools import lru_cache
-# from pathlib import Path
-
-# Third-party libraries
+import cairosvg
 import numpy as np
 import pygame
-import cairosvg
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401, usado para plotting 3D
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-# Project-specific imports
+from .rendering import draw_dashed_circle, draw_dashed_line  # noqa: F401  (backward compatibility)
 from .settings import (
-    SIM_WIDTH, SIM_HEIGHT,
-    GRID_WIDTH, GRID_HEIGHT,
     CELL_SIZE,
-    INTEREST_POINT_CENTER,
-    FRIEND_SPEED,
     ENEMY_SPEED,
-    PLOT_THRESHOLD
+    FRIEND_SPEED,
+    GRID_HEIGHT,
+    GRID_WIDTH,
+    INTEREST_POINT_CENTER,
+    PLOT_THRESHOLD,
+    SIM_HEIGHT,
+    SIM_WIDTH,
 )
 
-# -----------------------------------------------------------------------------
-# Funções de Desenho
-# -----------------------------------------------------------------------------
-
-def draw_dashed_circle(
-    surface: pygame.Surface,
-    color: Tuple[int, int, int, int],
-    center: Tuple[int, int],
-    radius: int,
-    dash_length: int = 5,
-    space_length: int = 5,
-    width: int = 1
-) -> None:
-    """
-    Desenha um círculo tracejado na superfície pygame.
-    
-    O círculo é composto por múltiplos segmentos de linha (dashes) distribuídos
-    uniformemente ao redor da circunferência.
-    
-    Args:
-        surface: Superfície pygame onde o círculo será desenhado.
-        color: Cor RGBA do círculo (R, G, B, Alpha).
-        center: Centro do círculo como tupla (x, y).
-        radius: Raio do círculo em pixels.
-        dash_length: Comprimento de cada traço em pixels.
-        space_length: Espaço entre traços em pixels.
-        width: Espessura da linha em pixels.
-        
-    Note:
-        Se radius <= 0, a função retorna sem desenhar nada.
-    """
-    if radius <= 0:
-        return
-    
-    # Calcular circunferência e número de dashes
-    circumference: float = 2 * math.pi * radius
-    num_dashes: int = int(circumference / (dash_length + space_length))
-    angle_between: float = 2 * math.pi / num_dashes
-
-    for i in range(num_dashes):
-        start_angle: float = i * angle_between
-        dash_angle: float = dash_length / radius  # Ângulo correspondente ao dash
-        end_angle: float = start_angle + dash_angle
-
-        start_pos: Tuple[float, float] = (
-            center[0] + radius * math.cos(start_angle),
-            center[1] + radius * math.sin(start_angle)
-        )
-        end_pos: Tuple[float, float] = (
-            center[0] + radius * math.cos(end_angle),
-            center[1] + radius * math.sin(end_angle)
-        )
-        pygame.draw.line(surface, color, start_pos, end_pos, width)
-
-
-def draw_dashed_line(
-    surface: pygame.Surface, 
-    color: Tuple[int, int, int, int],
-    start_pos: pygame.math.Vector2, 
-    end_pos: pygame.math.Vector2,
-    width: int = 1, 
-    dash_length: int = 5, 
-    space_length: int = 5
-) -> None:
-    """
-    Desenha uma linha tracejada entre dois pontos.
-    
-    Args:
-        surface: Superfície pygame onde a linha será desenhada.
-        color: Cor RGBA da linha (R, G, B, Alpha).
-        start_pos: Posição inicial como Vector2.
-        end_pos: Posição final como Vector2.
-        width: Espessura da linha em pixels.
-        dash_length: Comprimento de cada traço em pixels.
-        space_length: Espaço entre traços em pixels.
-        
-    Note:
-        Se start_pos == end_pos, a função retorna sem desenhar.
-    """
-    start = pygame.math.Vector2(start_pos)
-    end = pygame.math.Vector2(end_pos)
-    displacement = end - start
-    length: float = displacement.length()
-    
-    if length == 0:
-        return
-    
-    dash_vector = displacement.normalize() * dash_length
-    num_dashes: int = int(length / (dash_length + space_length))
-    
-    for i in range(num_dashes):
-        dash_start = start + (dash_length + space_length) * i * displacement.normalize()
-        dash_end = dash_start + dash_vector
-        pygame.draw.line(surface, color, dash_start, dash_end, width)
-
+Cell = Tuple[int, int]
 
 # -----------------------------------------------------------------------------
-# Funções de Kernel Gaussiano
-# -----------------------------------------------------------------------------
-
-def symmetrical_flat_topped_gaussian_10x10(
-    value: float, 
-    sigma: float, 
-    flat_radius: float
-) -> np.ndarray:
-    """
-    Cria um kernel Gaussiano 10x10 com topo plano (flat-topped).
-    
-    As coordenadas contínuas variam de -4.5 a +4.5 para garantir simetria.
-    O bump tem topo plano (valor = 1) dentro do raio especificado, e
-    decai gaussianamente fora dele.
-    
-    Args:
-        value: Valor de pico para escalar no centro.
-        sigma: Desvio padrão para a porção Gaussiana.
-        flat_radius: Raio (em coordenadas contínuas) onde o valor é constante (1.0).
-        
-    Returns:
-        Array numpy 10x10 representando o kernel.
-        
-    Note:
-        A função usa uma abordagem otimizada sem meshgrid para melhor performance.
-    """
-    kernel_size: int = 10
-    
-    # Criar grid de coordenadas manualmente (sem meshgrid para performance)
-    x = np.linspace(-4.5, 4.5, kernel_size)
-    
-    # Inicializar array para o bump
-    bump = np.empty((kernel_size, kernel_size), dtype=np.float64)
-    
-    # Calcular valores diretamente
-    for i in range(kernel_size):
-        y: float = x[i]  # Coordenada y
-        for j in range(kernel_size):
-            xi: float = x[j]  # Coordenada x
-            
-            # Calcular distância do centro
-            r: float = np.sqrt(xi**2 + y**2)
-            
-            # Aplicar topo plano ou decaimento Gaussiano
-            if r < flat_radius:
-                bump[i, j] = 1.0
-            else:
-                bump[i, j] = np.exp(-0.5 * (r / sigma)**2)
-    
-    return value * bump
-
-
-def smooth_matrix_with_kernel_10x10(
-    matrix: np.ndarray,
-    direction: np.ndarray,
-    sigma: float = 1.0,
-    flat_radius: float = 1.0
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Aplica um kernel Gaussiano 10x10 (com topo plano) a cada valor positivo na matriz.
-    
-    O bump é centralizado no pixel (i, j) sem mudar as dimensões originais.
-    Para cada pico, se o valor do bump for maior que o valor atual na região,
-    tanto a intensidade quanto o vetor de direção correspondente são atualizados.
-    
-    Args:
-        matrix: Array 2D com valores entre 0 e 1.
-        direction: Array com mesmas dimensões de matrix mais uma dimensão extra
-                  para o vetor de direção (ex: shape (n_rows, n_cols, 2)).
-        sigma: Desvio padrão para a porção Gaussiana.
-        flat_radius: Raio do topo plano (em coordenadas contínuas).
-        
-    Returns:
-        Tupla contendo:
-        - result: Matriz atualizada com os bumps aplicados.
-        - result_direction: Array de direção atualizado.
-        
-    Note:
-        Otimizado para matrizes com muitos picos (>50) usando cache de kernels.
-    """
-    result = np.copy(matrix)
-    result_direction = np.copy(direction)
-    peaks = np.argwhere(matrix > 0)
-    kernel_size: int = 10
-    anchor: int = kernel_size // 2
-    
-    # Otimização: pré-calcular kernels para valores únicos se há muitos picos
-    peak_values: Optional[Dict[float, np.ndarray]] = None
-    if len(peaks) > 50:  # Threshold arbitrário
-        peak_values = {}
-        for (i, j) in peaks:
-            value: float = matrix[i, j]
-            if value not in peak_values:
-                peak_values[value] = symmetrical_flat_topped_gaussian_10x10(
-                    value, sigma, flat_radius
-                )
-
-    for (i, j) in peaks:
-        value: float = matrix[i, j]
-        
-        # Usar bump pré-calculado se disponível
-        if peak_values is not None:
-            bump = peak_values[value]
-        else:
-            bump = symmetrical_flat_topped_gaussian_10x10(value, sigma, flat_radius)
-            
-        bump_direction = direction[i, j]  # Vetor de direção no pico
-
-        # Calcular índices de forma eficiente
-        i_start: int = max(0, i - anchor)
-        j_start: int = max(0, j - anchor)
-        i_end: int = min(matrix.shape[0], i + anchor)
-        j_end: int = min(matrix.shape[1], j + anchor)
-
-        # Calcular índices do bump
-        bump_i_start: int = max(0, anchor - (i - i_start))
-        bump_j_start: int = max(0, anchor - (j - j_start))
-        bump_i_end: int = bump_i_start + (i_end - i_start)
-        bump_j_end: int = bump_j_start + (j_end - j_start)
-
-        # Obter views das regiões (sem cópia)
-        region = result[i_start:i_end, j_start:j_end]
-        bump_region = bump[bump_i_start:bump_i_end, bump_j_start:bump_j_end]
-
-        # Criar máscara para pixels onde bump > valor atual
-        mask = bump_region > region
-        
-        # Usar operações in-place
-        np.maximum(region, bump_region, out=region)
-
-        # Atualizar vetores de direção onde o bump aumentou o valor
-        for dim in range(direction.shape[-1]):
-            for di in range(i_end - i_start):
-                for dj in range(j_end - j_start):
-                    if mask[di, dj]:
-                        result_direction[i_start + di, j_start + dj, dim] = bump_direction[dim]
-
-    return result, result_direction
-
-
-# -----------------------------------------------------------------------------
-# Conversão de Coordenadas
-# -----------------------------------------------------------------------------
-
-def sim_to_geo(pos_x: float, pos_y: float) -> Tuple[float, float]:
-    """
-    Converte coordenadas de simulação para coordenadas geográficas.
-    
-    Args:
-        pos_x: Posição X na simulação.
-        pos_y: Posição Y na simulação.
-        
-    Returns:
-        Tupla (Longitude, Latitude) em coordenadas geográficas.
-        
-    Note:
-        Requer que GEO_TOP_LEFT e GEO_BOTTOM_RIGHT estejam definidos em settings.
-    """
-    from .settings import GEO_TOP_LEFT, GEO_BOTTOM_RIGHT
-    
-    lon_left, lat_top = GEO_TOP_LEFT
-    lon_right, lat_bottom = GEO_BOTTOM_RIGHT
-    
-    lon: float = lon_left + (pos_x / SIM_WIDTH) * (lon_right - lon_left)
-    lat: float = lat_top + (pos_y / SIM_HEIGHT) * (lat_bottom - lat_top)
-    
-    return lon, lat
-
-
-# -----------------------------------------------------------------------------
-# Utilitários de SVG e Imagem
-# -----------------------------------------------------------------------------
-
-def load_svg_as_surface(svg_path: str) -> pygame.Surface:
-    """
-    Converte um arquivo SVG para uma superfície pygame com suporte a alpha.
-    
-    Args:
-        svg_path: Caminho para o arquivo SVG.
-        
-    Returns:
-        Superfície pygame com a imagem convertida.
-        
-    Raises:
-        FileNotFoundError: Se o arquivo SVG não for encontrado.
-    """
-    # Converter SVG para PNG em memória
-    png_data: bytes = cairosvg.svg2png(url=svg_path)
-    image_data = io.BytesIO(png_data)
-    surface: pygame.Surface = pygame.image.load(image_data).convert_alpha()
-    return surface
-
-
-# -----------------------------------------------------------------------------
-# Utilitários de Grid e Posicionamento
+# Grid helpers
 # -----------------------------------------------------------------------------
 
 def pos_to_cell(
-    pos: pygame.math.Vector2, 
-    cell_size: int = CELL_SIZE,
-    grid_width: int = GRID_WIDTH, 
-    grid_height: int = GRID_HEIGHT
-) -> Tuple[int, int]:
-    """
-    Converte uma posição (Vector2) para coordenadas de célula na grid.
-    
+    pos: pygame.math.Vector2,
+    cell_size: float = CELL_SIZE,
+    grid_width: int = GRID_WIDTH,
+    grid_height: int = GRID_HEIGHT,
+) -> Cell:
+    """Convert a position in pixels to the ``(x, y)`` index of its grid cell.
+
+    PT-BR: Converte uma posição em pixels para o índice ``(x, y)`` da célula.
+
+    Indices are clamped to ``[0, grid_width - 1]`` x ``[0, grid_height - 1]``.
+
     Args:
-        pos: Vetor de posição.
-        cell_size: Tamanho de cada célula em pixels.
-        grid_width: Largura da grid em células.
-        grid_height: Altura da grid em células.
-        
+        pos: Position (anything with ``.x`` and ``.y``).
+        cell_size: Cell size in pixels.
+        grid_width: Grid width in cells.
+        grid_height: Grid height in cells.
+
     Returns:
-        Tupla (x, y) com coordenadas da célula.
-        
-    Note:
-        As coordenadas são clampadas para evitar índices fora dos limites.
+        ``(cell_x, cell_y)``.
     """
-    x: int = int(min(pos.x // cell_size, grid_width - 1))
-    y: int = int(min(pos.y // cell_size, grid_height - 1))
-    
+    x = int(max(0, min(pos.x // cell_size, grid_width - 1)))
+    y = int(max(0, min(pos.y // cell_size, grid_height - 1)))
     return (x, y)
 
 
+def cell_center(cell: Tuple[int, int], cell_size: float = CELL_SIZE) -> pygame.math.Vector2:
+    """Return the centre (in pixels) of a grid cell.
+
+    PT-BR: Retorna o centro (em pixels) de uma célula da grade.
+    """
+    return pygame.math.Vector2((cell[0] + 0.5) * cell_size, (cell[1] + 0.5) * cell_size)
+
+
+def active_cells(matrix: np.ndarray, threshold: float) -> List[Cell]:
+    """Return the cells whose value is ``>= threshold``, in row-major order.
+
+    This is the vectorised equivalent of iterating with ``np.ndenumerate`` and
+    keeping the cells above the threshold, and is orders of magnitude faster.
+
+    PT-BR: Retorna as células com valor ``>= threshold`` (em ordem de linhas),
+    equivalente vetorizado de percorrer a matriz com ``np.ndenumerate``.
+    """
+    rows, cols = np.nonzero(matrix >= threshold)
+    return list(zip(rows.tolist(), cols.tolist(), strict=True))
+
+
+def sim_to_geo(pos_x: float, pos_y: float) -> Tuple[float, float]:
+    """Convert simulation pixels to ``(longitude, latitude)``.
+
+    The simulation rectangle is mapped linearly onto the box defined by the
+    ``GEO_TOP_LEFT`` and ``GEO_BOTTOM_RIGHT`` settings.
+
+    PT-BR: Converte coordenadas da simulação para ``(longitude, latitude)``.
+    """
+    from .settings import GEO_BOTTOM_RIGHT, GEO_TOP_LEFT
+
+    lon_left, lat_top = GEO_TOP_LEFT
+    lon_right, lat_bottom = GEO_BOTTOM_RIGHT
+    lon = lon_left + (pos_x / SIM_WIDTH) * (lon_right - lon_left)
+    lat = lat_top + (pos_y / SIM_HEIGHT) * (lat_bottom - lat_top)
+    return lon, lat
+
+
+def load_svg_as_surface(svg_path: str) -> pygame.Surface:
+    """Rasterise an SVG file into a pygame surface with per-pixel alpha.
+
+    PT-BR: Converte um arquivo SVG em uma superfície pygame com transparência.
+
+    Note:
+        Requires an initialised display (``convert_alpha``).
+    """
+    png_data: bytes = cairosvg.svg2png(url=svg_path)
+    return pygame.image.load(io.BytesIO(png_data)).convert_alpha()
+
+
 # -----------------------------------------------------------------------------
-# Cálculos de Interceptação e Busca
+# Interception
 # -----------------------------------------------------------------------------
+
+def _interception_time(
+    chaser_pos: pygame.math.Vector2,
+    chaser_speed: float,
+    target_pos: pygame.math.Vector2,
+    target_vel: pygame.math.Vector2,
+) -> Optional[float]:
+    """Smallest ``t > 0`` solving ``|r + v t| = s t`` (``None`` if there is none)."""
+    r = target_pos - chaser_pos
+    a = target_vel.dot(target_vel) - chaser_speed ** 2
+    b = 2 * r.dot(target_vel)
+    c = r.dot(r)
+
+    if abs(a) < 1e-6:  # Same speed: the equation degenerates to a linear one.
+        if abs(b) > 1e-6:
+            t = -c / b
+            return t if t > 0 else None
+        return None
+
+    discriminant = b ** 2 - 4 * a * c
+    if discriminant < 0:
+        return None
+    sqrt_disc = math.sqrt(discriminant)
+    candidates = [t for t in ((-b + sqrt_disc) / (2 * a), (-b - sqrt_disc) / (2 * a)) if t > 0]
+    return min(candidates) if candidates else None
+
 
 def intercept_direction(
     chaser_pos: pygame.math.Vector2,
     chaser_speed: float,
     target_pos: pygame.math.Vector2,
-    target_vel: pygame.math.Vector2
+    target_vel: pygame.math.Vector2,
 ) -> pygame.math.Vector2:
-    """
-    Calcula a direção ótima de interceptação para um perseguidor alcançar um alvo.
-    
-    O método resolve para o tempo 't' de interceptação usando:
-        |r + target_vel * t| = chaser_speed * t
-    onde r = target_pos - chaser_pos.
-    
-    Se não houver solução válida (discriminante negativo ou t não-positivo),
-    retorna o vetor normalizado do perseguidor para o alvo.
-    
+    """Velocity a chaser should fly to intercept a target moving at constant velocity.
+
+    Solves ``|r + target_vel * t| = chaser_speed * t`` (``r = target_pos - chaser_pos``)
+    for the earliest ``t > 0``. If there is no solution, the chaser simply heads
+    straight to the target's current position.
+
+    PT-BR: Velocidade que o perseguidor deve adotar para interceptar um alvo com
+    velocidade constante; sem solução, aponta direto para o alvo.
+
     Args:
-        chaser_pos: Posição do perseguidor.
-        chaser_speed: Velocidade constante do perseguidor.
-        target_pos: Posição do alvo.
-        target_vel: Velocidade do alvo.
-        
+        chaser_pos: Chaser position.
+        chaser_speed: Chaser speed (pixels per step).
+        target_pos: Target position.
+        target_vel: Target velocity (pixels per step).
+
     Returns:
-        Velocidade como Vector2 na direção de interceptação.
-        
-    Note:
-        Se não houver interceptação possível, retorna direção direta ao alvo.
+        Velocity vector of length ``chaser_speed`` (or zero if both positions coincide).
     """
-    r = target_pos - chaser_pos
-    a: float = target_vel.dot(target_vel) - chaser_speed ** 2
-    b: float = 2 * r.dot(target_vel)
-    c: float = r.dot(r)
-
-    t: float = 0.0  # Tempo de fallback
-
-    # Resolver equação quadrática
-    if abs(a) < 1e-6:  # Caso quase-linear
-        if abs(b) > 1e-6:
-            t = -c / b
-    else:
-        discriminant: float = b ** 2 - 4 * a * c
-        if discriminant >= 0:
-            sqrt_disc: float = math.sqrt(discriminant)
-            t1: float = (-b + sqrt_disc) / (2 * a)
-            t2: float = (-b - sqrt_disc) / (2 * a)
-            t_candidates = [t_val for t_val in (t1, t2) if t_val > 0]
-            if t_candidates:
-                t = min(t_candidates)
-
-    # Calcular ponto de interceptação e direção
-    if t <= 0:
+    t = _interception_time(chaser_pos, chaser_speed, target_pos, target_vel)
+    if t is None:
         direction = target_pos - chaser_pos
     else:
-        intercept_point = target_pos + target_vel * t
-        direction = intercept_point - chaser_pos
-        
-    # Normalizar e aplicar velocidade
-    if direction.length() > 0:
-        vel = direction.normalize() * chaser_speed
-    else:
-        vel = pygame.math.Vector2(0, 0)
+        direction = (target_pos + target_vel * t) - chaser_pos
 
-    return vel
+    if direction.length() > 0:
+        return direction.normalize() * chaser_speed
+    return pygame.math.Vector2(0, 0)
 
 
 def can_intercept(
@@ -438,346 +192,284 @@ def can_intercept(
     chaser_speed: float,
     target_pos: pygame.math.Vector2,
     target_vel: pygame.math.Vector2,
-    point_of_interest: Optional[pygame.math.Vector2] = None
+    point_of_interest: Optional[pygame.math.Vector2] = None,
 ) -> bool:
-    """
-    Determina se o perseguidor pode interceptar o alvo antes que ele atinja o ponto de interesse.
-    
-    Resolve a equação:
-        ||r + target_vel * t|| = chaser_speed * t
-    onde r = target_pos - chaser_pos.
-    
-    Retorna True se existir t > 0 para interceptação E se o tempo de interceptação
-    for menor que o tempo para o alvo atingir o ponto de interesse.
-    
+    """Whether the chaser can intercept the target before it reaches ``point_of_interest``.
+
+    PT-BR: Indica se o perseguidor consegue interceptar o alvo antes que ele
+    alcance o ponto de interesse.
+
     Args:
-        chaser_pos: Posição do perseguidor.
-        chaser_speed: Velocidade constante do perseguidor.
-        target_pos: Posição do alvo.
-        target_vel: Velocidade do alvo.
-        point_of_interest: Ponto a ser defendido. Se None, usa INTEREST_POINT_CENTER.
-        
-    Returns:
-        True se a interceptação for possível antes do alvo atingir o ponto de interesse.
-        
-    Example:
-        >>> can_intercept(pos_friend, FRIEND_SPEED, pos_enemy, vel_enemy)
-        True
+        chaser_pos: Chaser position.
+        chaser_speed: Chaser speed.
+        target_pos: Target position.
+        target_vel: Target velocity. A stationary target returns ``False``.
+        point_of_interest: Point being defended (defaults to ``INTEREST_POINT_CENTER``).
     """
     if point_of_interest is None:
         point_of_interest = INTEREST_POINT_CENTER
-        
-    # Calcular coeficientes da equação quadrática
+
     r = target_pos - chaser_pos
-    a: float = target_vel.dot(target_vel) - chaser_speed ** 2
-    b: float = 2 * r.dot(target_vel)
-    c: float = r.dot(r)
-    
-    # Resolver para o tempo de interceptação
-    if abs(a) < 1e-6:  # Caso quase-linear
-        if abs(b) > 1e-6:
-            t: float = -c / b
-        else:
-            # Perseguidor já está no alvo
-            return r.length() == 0
-    else:
-        discriminant: float = b ** 2 - 4 * a * c
-        if discriminant < 0:
-            return False  # Sem solução real
-        sqrt_disc: float = math.sqrt(discriminant)
-        t1: float = (-b + sqrt_disc) / (2 * a)
-        t2: float = (-b - sqrt_disc) / (2 * a)
-        t_candidates = [t_val for t_val in (t1, t2) if t_val > 0]
-        if not t_candidates:
-            return False
-        t = min(t_candidates)
+    a = target_vel.dot(target_vel) - chaser_speed ** 2
+    if abs(a) < 1e-6 and abs(2 * r.dot(target_vel)) <= 1e-6:
+        # Degenerate case: only "already there" counts as an interception.
+        return r.length() == 0
 
-    # Verificar se tempo de interceptação é positivo
-    if t <= 0:
+    t = _interception_time(chaser_pos, chaser_speed, target_pos, target_vel)
+    if t is None or target_vel.length() == 0:
         return False
-    
-    # Calcular tempo para alvo atingir ponto de interesse
-    if target_vel.length() == 0:
-        return False  # Alvo estacionário
-    
-    t_pi: float = (point_of_interest - target_pos).length() / target_vel.length()
-    
-    # Perseguidor intercepta se t < t_pi
-    return t < t_pi
+
+    time_to_poi = (point_of_interest - target_pos).length() / target_vel.length()
+    return t < time_to_poi
 
 
 # -----------------------------------------------------------------------------
-# Utilitários de Plotting
+# Strategy helper
 # -----------------------------------------------------------------------------
 
-def plot_individual_states_matplotlib(state: Dict[str, Any]) -> None:
-    """
-    Gera um plot 3D dos estados de detecção de drones inimigos e amigos.
-    
-    Exibe dois subplots ("Enemy Detection" e "Friend Detection") com legenda
-    de cores que mapeia cores para ângulos (em radianos π). Também plota a
-    posição do drone como uma linha vermelha vertical.
-    
+def get_friends_hold(
+    state: Dict[str, Any],
+    friend_activation_threshold_position: float = 0.7,
+    enemy_activation_threshold_position: float = 0.4,
+) -> list:
+    """Return the friendly positions that are *not* assigned to any interception.
+
+    Greedy assignment: enemies are processed from the closest to the interest
+    point outwards and each one is given the closest free friend that
+    :func:`can_intercept` it. Friends left over must hold position.
+
+    PT-BR: Retorna as posições amigas que não foram designadas a nenhuma
+    interceptação (devem manter posição), usando uma atribuição gulosa.
+
     Args:
-        state: Dicionário contendo informações de estado do drone.
-               Deve conter as chaves:
-               - 'pos': array com posição [x, y]
-               - 'enemy_intensity': matriz de intensidade de inimigos
-               - 'enemy_direction': matriz de direção de inimigos
-               - 'friend_intensity': matriz de intensidade de amigos
-               - 'friend_direction': matriz de direção de amigos
-               
-    Note:
-        Usa matplotlib para renderização. A janela será exibida com plt.show().
+        state: Behaviour state dictionary (``pos``, ``friend_intensity``,
+            ``enemy_intensity``, ``enemy_direction``).
+        friend_activation_threshold_position: Minimum intensity for a friend cell.
+        enemy_activation_threshold_position: Minimum intensity for an enemy cell.
+
+    Returns:
+        List of ``(cell, position)`` tuples.
     """
-    fig = plt.figure(figsize=(8, 6))
-    cmap = plt.cm.hsv  # Paleta de cores baseada em ângulos
+    pos_arr = np.squeeze(state["pos"])
+    pos = pygame.math.Vector2(float(pos_arr[0]), float(pos_arr[1]))
+    friend_intensity = np.squeeze(state["friend_intensity"])
+    enemy_intensity = np.squeeze(state["enemy_intensity"])
+    enemy_direction = np.squeeze(state["enemy_direction"])
 
-    # Iterar sobre as duas views de detecção
-    for idx, plot_view in enumerate(["Enemy Detection"]):
-        ax = fig.add_subplot(111, projection='3d')
-        ax.set_box_aspect((1, 1, 0.4))
+    enemy_targets = []
+    for cell in active_cells(enemy_intensity, enemy_activation_threshold_position):
+        target_pos = cell_center(cell)
+        enemy_targets.append((cell, target_pos, target_pos.distance_to(INTEREST_POINT_CENTER)))
 
-        # Criar meshgrid para dimensões da grid
-        x = np.linspace(CELL_SIZE / 2, SIM_WIDTH - CELL_SIZE / 2, GRID_WIDTH)
-        y = np.linspace(CELL_SIZE / 2, SIM_HEIGHT - CELL_SIZE / 2, GRID_HEIGHT)
-        X, Y = np.meshgrid(x, y)
+    my_cell = pos_to_cell(pos)
+    friend_candidates = [(cell, cell_center(cell))
+                         for cell in active_cells(friend_intensity, friend_activation_threshold_position)]
+    if not any(cell == my_cell for cell, _ in friend_candidates):
+        friend_candidates.append((my_cell, cell_center(my_cell)))
 
-        if plot_view == "Enemy Detection":
-            to_plot = state['enemy_intensity']
-            direction = state['enemy_direction']
-        elif plot_view == "Friend Detection":
-            to_plot = state['friend_intensity']
-            direction = state['friend_direction']
+    if not enemy_targets:
+        return list(friend_candidates)
 
-        # Suavizar matriz e obter direções resultantes
-        Z_smoothed, result_direction = smooth_matrix_with_kernel_10x10(
-            to_plot, direction, sigma=2, flat_radius=1
-        )
+    enemy_targets.sort(key=lambda t: t[2])
+    assigned_friend_cells = set()
+    for cell, target_pos, _ in enemy_targets:
+        enemy_vel = pygame.math.Vector2(float(enemy_direction[cell][0]), float(enemy_direction[cell][1])) * ENEMY_SPEED
+        for candidate_cell, candidate_pos in sorted(friend_candidates, key=lambda x: x[1].distance_to(target_pos)):
+            if candidate_cell not in assigned_friend_cells and can_intercept(
+                candidate_pos, FRIEND_SPEED, target_pos, enemy_vel, INTEREST_POINT_CENTER
+            ):
+                assigned_friend_cells.add(candidate_cell)
+                break
 
-        # Ajustar shape se necessário
-        if Z_smoothed.shape != X.shape:
-            Z_smoothed = Z_smoothed.T
-            result_direction = result_direction.transpose(1, 0, 2)
-
-        # Calcular ângulos dos vetores de direção
-        dir_x = result_direction[..., 0]
-        dir_y = result_direction[..., 1]
-        angle = np.arctan2(dir_y, dir_x)
-        norm_angle = (angle + math.pi) / (2 * math.pi)
-        facecolors = cmap(norm_angle)
-        facecolors[Z_smoothed < PLOT_THRESHOLD] = [1, 1, 1, 1]
-
-        # Plotar superfície 3D
-        ax.plot_surface(X, Y, Z_smoothed, facecolors=facecolors,
-                        linewidth=0, antialiased=True, shade=False)
-        ax.contourf(X, Y, Z_smoothed, zdir='x', offset=ax.get_xlim()[0], cmap="Greys")
-        ax.contourf(X, Y, Z_smoothed, zdir='y', offset=ax.get_ylim()[0], cmap="Greys")
-        ax.plot_wireframe(X, Y, Z_smoothed, color='black', linewidth=0.2, rstride=1, cstride=1)
-
-        # Plotar posição do drone como linha vertical preta
-        ax.plot([state['pos'][0], state['pos'][0]],
-                [state['pos'][1], state['pos'][1]],
-                [0, 1], color='black', linewidth=4, zorder=10)
-
-        x_offset = ax.get_xlim()[0]
-        ax.plot([x_offset, x_offset],
-                [state['pos'][1], state['pos'][1]],
-                [0, 1], color='black', linewidth=4, zorder=10)
-
-        y_offset = ax.get_ylim()[0]
-        ax.plot([state['pos'][0], state['pos'][0]],
-                [y_offset, y_offset],
-                [0, 1], color='black', linewidth=4, zorder=10)
-
-        ax.set_xlabel('X', fontsize=10)
-        ax.set_ylabel('Y', fontsize=10)
-        ax.set_zlabel('Recency', fontsize=10)
-        ax.invert_yaxis()
-        ax.set_xlim(0, SIM_WIDTH)
-        ax.set_ylim(SIM_HEIGHT, 0)
-        ax.set_zlim(0, 1.5)
-
-    fig.suptitle("Detection and Position Plot", fontsize=16, y=0.98)
-    fig.tight_layout(rect=[0, 0, 0.75, 1])
-
-    # Adicionar colorbar
-    norm = plt.Normalize(vmin=-math.pi, vmax=math.pi)
-    mappable_for_colorbar = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-    mappable_for_colorbar.set_array([])
-    cbar_ax = fig.add_axes([0.85, 0.2, 0.02, 0.7])
-    cbar = fig.colorbar(mappable_for_colorbar, cax=cbar_ax, label='Angle (rad)')
-    cbar.set_ticks([-math.pi, -math.pi / 2, 0, math.pi / 2, math.pi])
-    cbar.set_ticklabels(['-π', '-π/2', '0', '+π/2', '+π'])
-    plt.show()
+    return [(cell, candidate_pos) for cell, candidate_pos in friend_candidates
+            if cell not in assigned_friend_cells]
 
 
 # -----------------------------------------------------------------------------
-# Geração de Matrizes Esparsas
+# Matrices
 # -----------------------------------------------------------------------------
 
 def generate_sparse_matrix(
     shape: Tuple[int, int] = (GRID_WIDTH, GRID_HEIGHT),
-    max_nonzero: int = 20, 
-    seed: Optional[int] = None
+    max_nonzero: int = 20,
+    seed: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Gera uma matriz esparsa com até 'max_nonzero' elementos não-zero.
-    
-    Valores não-zero são amostrados de uma distribuição normal (média=1, std=1)
-    e clampados para [0, 1]. Para cada célula não-zero, um vetor de direção
-    normalizado aleatório é gerado.
-    
+    """Random sparse intensity matrix plus a matching matrix of unit directions.
+
+    Used to simulate faulty ("broken") drones that broadcast garbage.
+    Up to ``max_nonzero`` cells get an intensity drawn from ``N(1, 1)`` clipped
+    to ``[0, 1]`` and a random unit direction.
+
+    PT-BR: Gera uma matriz esparsa aleatória de intensidades e uma matriz de
+    direções unitárias (usada para simular drones defeituosos).
+
     Args:
-        shape: Forma da matriz de intensidade (linhas, colunas).
-        max_nonzero: Número máximo de elementos não-zero.
-        seed: Seed para geração de números aleatórios. Se None, usa seed aleatória.
-        
+        shape: Shape of the intensity matrix.
+        max_nonzero: Maximum number of non-zero cells.
+        seed: Seed for reproducibility. With a seed, private RNGs are used, so the
+            global ``random`` / ``numpy.random`` state is left untouched.
+
     Returns:
-        Tupla contendo:
-        - matrix: Array com valores de intensidade.
-        - direction: Array de forma (rows, cols, 2) com vetores de direção.
-                    Células com intensidade zero têm vetor (0, 0).
-                    
+        ``(matrix, direction)`` with shapes ``shape`` and ``shape + (2,)``.
+
     Example:
-        >>> matrix, direction = generate_sparse_matrix((50, 50), max_nonzero=10)
-        >>> assert matrix.shape == (50, 50)
-        >>> assert direction.shape == (50, 50, 2)
+        >>> matrix, direction = generate_sparse_matrix((50, 50), max_nonzero=10, seed=1)
+        >>> matrix.shape, direction.shape
+        ((50, 50), (50, 50, 2))
     """
     if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
-    
+        py_rng: Any = random.Random(seed)
+        np_rng: Any = np.random.RandomState(seed)
+    else:
+        py_rng, np_rng = random, np.random
+
     matrix = np.zeros(shape)
     direction = np.zeros((shape[0], shape[1], 2), dtype=float)
-    total_cells: int = shape[0] * shape[1]
-    nonzero_count: int = min(random.randint(0, max_nonzero), total_cells)
-    chosen_indices = random.sample(range(total_cells), nonzero_count)
-    
-    for idx in chosen_indices:
-        i: int = idx // shape[1]
-        j: int = idx % shape[1]
-        value: float = np.random.normal(1, 1)
-        matrix[i, j] = np.clip(value, 0, 1)
-        
-        # Gerar vetor de direção normalizado aleatório
-        vec = pygame.math.Vector2(random.uniform(-1, 1), random.uniform(-1, 1))
+    total_cells = shape[0] * shape[1]
+    nonzero_count = min(py_rng.randint(0, max_nonzero), total_cells)
+
+    for idx in py_rng.sample(range(total_cells), nonzero_count):
+        i, j = divmod(idx, shape[1])
+        matrix[i, j] = np.clip(np_rng.normal(1, 1), 0, 1)
+        vec = pygame.math.Vector2(py_rng.uniform(-1, 1), py_rng.uniform(-1, 1))
         if vec.length() > 0:
             vec = vec.normalize()
-        else:
-            vec = pygame.math.Vector2(0, 0)
         direction[i, j] = (vec.x, vec.y)
-    
+
     return matrix, direction
 
 
+@lru_cache(maxsize=32)
+def _unit_flat_topped_gaussian_10x10(sigma: float, flat_radius: float) -> np.ndarray:
+    x = np.linspace(-4.5, 4.5, 10)
+    xx, yy = np.meshgrid(x, x)  # yy varies along rows, xx along columns
+    r = np.sqrt(xx ** 2 + yy ** 2)
+    bump = np.where(r < flat_radius, 1.0, np.exp(-0.5 * (r / sigma) ** 2))
+    bump.setflags(write=False)
+    return bump
+
+
+def symmetrical_flat_topped_gaussian_10x10(value: float, sigma: float, flat_radius: float) -> np.ndarray:
+    """10x10 Gaussian kernel with a flat top, scaled by ``value``.
+
+    Coordinates span ``[-4.5, 4.5]`` so the kernel is symmetric. Inside
+    ``flat_radius`` the kernel is 1; outside it decays as ``exp(-r²/2σ²)``.
+
+    PT-BR: Kernel gaussiano 10x10 com topo plano, multiplicado por ``value``.
+    """
+    return value * _unit_flat_topped_gaussian_10x10(float(sigma), float(flat_radius))
+
+
+def smooth_matrix_with_kernel_10x10(
+    matrix: np.ndarray,
+    direction: np.ndarray,
+    sigma: float = 1.0,
+    flat_radius: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Spread every positive cell with a flat-topped Gaussian bump (for plotting).
+
+    For each peak, cells where the bump is larger than the current value take
+    the bump value *and* the peak's direction. The input arrays are not modified.
+
+    PT-BR: Espalha cada célula positiva com um "morro" gaussiano (usado nos
+    gráficos 3D); as células elevadas herdam a direção do pico.
+
+    Args:
+        matrix: 2-D array with values in [0, 1].
+        direction: Array with shape ``matrix.shape + (2,)``.
+        sigma: Standard deviation of the Gaussian part.
+        flat_radius: Radius of the flat top.
+
+    Returns:
+        ``(smoothed_matrix, smoothed_direction)``.
+    """
+    result = np.copy(matrix)
+    result_direction = np.copy(direction)
+    unit_bump = _unit_flat_topped_gaussian_10x10(float(sigma), float(flat_radius))
+    anchor = 5  # kernel_size // 2
+
+    for i, j in np.argwhere(matrix > 0):
+        bump = matrix[i, j] * unit_bump
+
+        i_start, j_start = max(0, i - anchor), max(0, j - anchor)
+        i_end, j_end = min(matrix.shape[0], i + anchor), min(matrix.shape[1], j + anchor)
+        bump_i_start = anchor - (i - i_start)
+        bump_j_start = anchor - (j - j_start)
+
+        region = result[i_start:i_end, j_start:j_end]
+        bump_region = bump[bump_i_start:bump_i_start + (i_end - i_start),
+                           bump_j_start:bump_j_start + (j_end - j_start)]
+
+        mask = bump_region > region
+        np.maximum(region, bump_region, out=region)
+        result_direction[i_start:i_end, j_start:j_end][mask] = direction[i, j]
+
+    return result, result_direction
+
+
 # -----------------------------------------------------------------------------
-# Utilitários de Estratégia
+# Debug plotting
 # -----------------------------------------------------------------------------
 
-def get_friends_hold(
-    state: Dict[str, Any], 
-    friend_activation_threshold_position: float = 0.7,
-    enemy_activation_threshold_position: float = 0.4
-) -> list:
-    """
-    Determina quais drones amigos devem manter posição defensiva.
-    
-    Analisa o estado atual e atribui drones amigos para interceptar inimigos
-    detectados. Drones que não conseguem interceptar ou não foram atribuídos
-    devem manter posição ("hold").
-    
+def plot_individual_states_matplotlib(state: Dict[str, Any]) -> None:
+    """Open a matplotlib window with a 3-D plot of a drone's enemy detections.
+
+    The surface height is the detection recency and the colour encodes the
+    estimated heading (angle in radians). Intended for interactive debugging.
+
+    PT-BR: Abre uma janela matplotlib com o gráfico 3D das detecções de
+    inimigos de um drone (altura = recência, cor = direção).
+
     Args:
-        state: Dicionário de estado contendo matrizes de detecção e posição.
-        friend_activation_threshold_position: Limiar de intensidade para considerar amigos.
-        enemy_activation_threshold_position: Limiar de intensidade para considerar inimigos.
-        
-    Returns:
-        Lista de tuplas (cell, position) indicando posições de hold para drones amigos.
-        
-    Note:
-        Usa can_intercept() para determinar se um drone pode interceptar um alvo.
+        state: Behaviour state dictionary with ``pos``, ``enemy_intensity`` and
+            ``enemy_direction`` (``friend_*`` keys are accepted but not plotted).
     """
-    # Extração e preparação do estado
-    pos = np.squeeze(state['pos'])
-    pos = pygame.math.Vector2(pos[0], pos[1])
-    friend_intensity = np.squeeze(state['friend_intensity'])
-    enemy_intensity = np.squeeze(state['enemy_intensity'])
-    enemy_direction = np.squeeze(state['enemy_direction'])
-    
-    enemy_targets = []
-    # Identificar células com inimigos detectados
-    for cell, intensity in np.ndenumerate(enemy_intensity):
-        if intensity < enemy_activation_threshold_position:
-            continue
-        
-        target_pos = pygame.math.Vector2(
-            (cell[0] + 0.5) * CELL_SIZE,
-            (cell[1] + 0.5) * CELL_SIZE
-        )
-        distance_to_interest: float = target_pos.distance_to(INTEREST_POINT_CENTER)
-        
-        enemy_targets.append((cell, target_pos, distance_to_interest))
-        
-    # Obter célula do drone atual
-    my_cell = pos_to_cell(pos)
-    my_cell_center = pygame.math.Vector2(
-        (my_cell[0] + 0.5) * CELL_SIZE,
-        (my_cell[1] + 0.5) * CELL_SIZE
+    import matplotlib.pyplot as plt  # Imported lazily: pyplot is slow to import.
+
+    fig = plt.figure(figsize=(8, 6))
+    cmap = plt.cm.hsv
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_box_aspect((1, 1, 0.4))
+
+    x = np.linspace(CELL_SIZE / 2, SIM_WIDTH - CELL_SIZE / 2, GRID_WIDTH)
+    y = np.linspace(CELL_SIZE / 2, SIM_HEIGHT - CELL_SIZE / 2, GRID_HEIGHT)
+    X, Y = np.meshgrid(x, y)
+
+    Z_smoothed, result_direction = smooth_matrix_with_kernel_10x10(
+        state["enemy_intensity"], state["enemy_direction"], sigma=2, flat_radius=1
     )
-    
-    # Obter candidatos amigos
-    friend_candidates = []
-    for cell, intensity in np.ndenumerate(friend_intensity):
-        if intensity >= friend_activation_threshold_position:
-            candidate_pos = pygame.math.Vector2(
-                (cell[0] + 0.5) * CELL_SIZE,
-                (cell[1] + 0.5) * CELL_SIZE
-            )
-            friend_candidates.append((cell, candidate_pos))
-            
-    # Incluir própria célula se não houver detecção ativa
-    if not any(cell == my_cell for cell, _ in friend_candidates):
-        friend_candidates.append((my_cell, my_cell_center))
-            
-    if not enemy_targets:
-        # Nenhum alvo detectado - todos mantêm posição
-        friends_hold = [(cell, candidate_pos) for (cell, candidate_pos) in friend_candidates]
-        return friends_hold
-    
-    # Ordenar alvos por proximidade ao ponto de interesse
-    enemy_targets.sort(key=lambda t: t[2])
-    
-    engagement_assignment = {}
-    assigned_friend_cells = set()
-    
-    # Atribuir candidatos amigos aos alvos inimigos
-    for cell, target_pos, _ in enemy_targets:
-        sorted_candidates = sorted(
-            friend_candidates, 
-            key=lambda x: x[1].distance_to(target_pos)
-        )
-        enemy_dir_vec = pygame.math.Vector2(
-            enemy_direction[cell][0], 
-            enemy_direction[cell][1]
-        ) * ENEMY_SPEED
-        
-        for candidate in sorted_candidates:
-            candidate_cell, candidate_pos = candidate
-            
-            if (candidate_cell not in assigned_friend_cells and 
-                can_intercept(candidate_pos, FRIEND_SPEED, target_pos, 
-                            enemy_dir_vec, INTEREST_POINT_CENTER)):
-                
-                engagement_assignment[tuple(target_pos)] = candidate_cell
-                assigned_friend_cells.add(candidate_cell)
-                break  # Próximo alvo
-    
-    # Drones não atribuídos devem manter posição
-    friends_hold = [
-        (cell, candidate_pos) 
-        for (cell, candidate_pos) in friend_candidates
-        if cell not in assigned_friend_cells
-    ]
-    
-    return friends_hold
+    if Z_smoothed.shape != X.shape:
+        Z_smoothed = Z_smoothed.T
+        result_direction = result_direction.transpose(1, 0, 2)
+
+    angle = np.arctan2(result_direction[..., 1], result_direction[..., 0])
+    facecolors = cmap((angle + math.pi) / (2 * math.pi))
+    facecolors[Z_smoothed < PLOT_THRESHOLD] = [1, 1, 1, 1]
+
+    ax.plot_surface(X, Y, Z_smoothed, facecolors=facecolors, linewidth=0, antialiased=True, shade=False)
+    ax.contourf(X, Y, Z_smoothed, zdir="x", offset=ax.get_xlim()[0], cmap="Greys")
+    ax.contourf(X, Y, Z_smoothed, zdir="y", offset=ax.get_ylim()[0], cmap="Greys")
+    ax.plot_wireframe(X, Y, Z_smoothed, color="black", linewidth=0.2, rstride=1, cstride=1)
+
+    px, py = state["pos"][0], state["pos"][1]
+    ax.plot([px, px], [py, py], [0, 1], color="black", linewidth=4, zorder=10)
+    ax.plot([ax.get_xlim()[0]] * 2, [py, py], [0, 1], color="black", linewidth=4, zorder=10)
+    ax.plot([px, px], [ax.get_ylim()[0]] * 2, [0, 1], color="black", linewidth=4, zorder=10)
+
+    ax.set_xlabel("X", fontsize=10)
+    ax.set_ylabel("Y", fontsize=10)
+    ax.set_zlabel("Recency", fontsize=10)
+    ax.invert_yaxis()
+    ax.set_xlim(0, SIM_WIDTH)
+    ax.set_ylim(SIM_HEIGHT, 0)
+    ax.set_zlim(0, 1.5)
+
+    fig.suptitle("Detection and Position Plot", fontsize=16, y=0.98)
+    fig.tight_layout(rect=[0, 0, 0.75, 1])
+
+    mappable = plt.cm.ScalarMappable(norm=plt.Normalize(vmin=-math.pi, vmax=math.pi), cmap=cmap)
+    mappable.set_array([])
+    cbar = fig.colorbar(mappable, cax=fig.add_axes([0.85, 0.2, 0.02, 0.7]), label="Angle (rad)")
+    cbar.set_ticks([-math.pi, -math.pi / 2, 0, math.pi / 2, math.pi])
+    cbar.set_ticklabels(["-π", "-π/2", "0", "+π/2", "+π"])
+    plt.show()

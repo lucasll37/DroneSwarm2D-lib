@@ -1,241 +1,120 @@
+"""Custom behaviours for the friendly drones of this project.
+
+PT-BR: Comportamentos customizados dos drones amigos deste projeto.
+
+A behaviour subclasses ``BaseBehavior`` and implements ``apply(state)``, which
+returns ``(info, velocity)``. ``state`` only contains what *this* drone knows
+(its own detections plus what it heard from its neighbours) - never the true
+positions of the enemies. See ``TUTORIAL.md`` for the full description.
+
+Three behaviours are defined here, one per drone role:
+
+* ``FriendCommonBehavior`` - intercept the most urgent enemy, otherwise patrol;
+* ``FriendAEWBehavior`` - orbit the interest point at ``AEW_RANGE``;
+* ``FriendRadarBehavior`` - stay still.
+
+Import this module only *after* ``DroneSwarm2D.init(...)``.
 """
-behaviors.py
 
-Comportamentos customizados para drones amigos.
-
-Define três tipos de comportamentos:
-- FriendCommonBehavior: Comportamento padrão de perseguição/patrulha
-- FriendAEWBehavior: Comportamento de órbita para drones AEW
-- FriendRadarBehavior: Comportamento estacionário para radares
-"""
-
-import sys
-from pathlib import Path
-from typing import Tuple
-
-import DroneSwarm2D
-from DroneSwarm2D.core import settings
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pygame
-from DroneSwarm2D.core.utils import pos_to_cell, intercept_direction, can_intercept
+
 from DroneSwarm2D.behaviorsDefault import BaseBehavior, BehaviorType
+from DroneSwarm2D.core import settings
+from DroneSwarm2D.core.utils import active_cells, cell_center, intercept_direction
+
+Info = Tuple[Any, Any, Any, Any]
+
+
+def orbit_velocity(pos: pygame.math.Vector2, radius: float, speed: float, k_radial: float = 0.0) -> pygame.math.Vector2:
+    """Velocity that circles the interest point.
+
+    PT-BR: Velocidade que circula o ponto de interesse.
+
+    Args:
+        pos: Current position.
+        radius: Desired orbit radius.
+        speed: Tangential speed.
+        k_radial: Gain of the radial correction that pulls the drone back to
+            ``radius`` (0 disables it).
+    """
+    r_vec = pos - settings.INTEREST_POINT_CENTER
+    if r_vec.length() == 0:
+        r_vec = pygame.math.Vector2(radius, 0)
+    radial_correction = k_radial * (radius - r_vec.length()) * r_vec.normalize()
+    tangent = pygame.math.Vector2(-r_vec.y, r_vec.x).normalize()
+    return tangent * speed + radial_correction
 
 
 class FriendCommonBehavior(BaseBehavior):
+    """Chase the detected enemy closest to the interest point; patrol when there is none.
+
+    PT-BR: Persegue o inimigo detectado mais próximo do ponto de interesse; sem
+    ameaças, patrulha em órbita.
+
+    This is intentionally simple: every drone chases the same enemy. Compare it
+    with ``FriendCommonBehaviorDefault``, which assigns one drone per enemy.
+
+    Args:
+        friend_activation_threshold_position: Minimum intensity to trust a friend cell.
+        enemy_activation_threshold_position: Minimum intensity to trust an enemy cell.
+        patrol_radius: Radius of the patrol orbit, in pixels.
     """
-    Comportamento padrão para drones amigos.
-    
-    Persegue inimigos detectados ou patrulha em órbita circular
-    ao redor do ponto de interesse quando não há ameaças.
-    
-    Attributes:
-        friend_activation_threshold_position: Limiar de intensidade para detecção de amigos
-        enemy_activation_threshold_position: Limiar de intensidade para detecção de inimigos
-    """
-    
+
     def __init__(
         self,
         friend_activation_threshold_position: float = 0.7,
-        enemy_activation_threshold_position: float = 0.4
+        enemy_activation_threshold_position: float = 0.4,
+        patrol_radius: float = 150,
     ) -> None:
-        """
-        Inicializa comportamento comum.
-        
-        Args:
-            friend_activation_threshold_position: Limiar para ativação de detecção de amigos
-            enemy_activation_threshold_position: Limiar para ativação de detecção de inimigos
-        """
         super().__init__(behavior_type=BehaviorType.COMMON)
-        self.friend_activation_threshold_position: float = friend_activation_threshold_position
-        self.enemy_activation_threshold_position: float = enemy_activation_threshold_position
+        self.friend_activation_threshold_position = friend_activation_threshold_position
+        self.enemy_activation_threshold_position = enemy_activation_threshold_position
+        self.patrol_radius = patrol_radius
 
-    def apply(self, state: dict, joystick_controlled: bool = False) -> Tuple[tuple, pygame.math.Vector2]:
-        """
-        Aplica comportamento ao drone.
-        
-        Args:
-            state: Dicionário com estado do drone (pos, intensities, directions)
-            joystick_controlled: Se drone está sob controle manual
-            
-        Returns:
-            Tupla (info, velocity) onde:
-                - info: Tupla (estado, target, projection, friends_hold)
-                - velocity: Vetor de velocidade pygame.math.Vector2
-        """
-        # Extração e preparação do estado
-        pos = np.squeeze(state['pos'])
-        pos = pygame.math.Vector2(pos[0], pos[1])
-        friend_intensity = np.squeeze(state['friend_intensity'])
-        enemy_intensity = np.squeeze(state['enemy_intensity'])
-        friend_direction = np.squeeze(state['friend_direction'])
-        enemy_direction = np.squeeze(state['enemy_direction'])
-        
-        patrol_radius: float = 150.0
-        enemy_targets: list = []
-        
-        # Identifica células com inimigos detectados
-        for cell, intensity in np.ndenumerate(enemy_intensity):
-            if intensity < self.enemy_activation_threshold_position:
-                continue
-            
-            target_pos = pygame.math.Vector2(
-                (cell[0] + 0.5) * settings.CELL_SIZE,
-                (cell[1] + 0.5) * settings.CELL_SIZE
-            )
-            distance_to_interest: float = target_pos.distance_to(settings.INTEREST_POINT_CENTER)
-            
-            enemy_targets.append((cell, target_pos, distance_to_interest))
-        
-        # Ordena alvos por distância ao ponto de interesse (mais próximo primeiro)
-        enemy_targets.sort(key=lambda t: t[2])
-        
-        if len(enemy_targets) > 0:
-            # Perseguir inimigo mais próximo do ponto de interesse
-            enemy = enemy_targets[0]
-            enemy_pos: pygame.math.Vector2 = enemy[1]
-            enemy_dir = enemy_direction[enemy[0]]
+    def apply(self, state: Dict[str, Any], joystick_controlled: bool = False) -> Tuple[Info, pygame.math.Vector2]:
+        pos = pygame.math.Vector2(*np.squeeze(state["pos"]).tolist())
+        enemy_intensity = np.squeeze(state["enemy_intensity"])
+        enemy_direction = np.squeeze(state["enemy_direction"])
 
-            info: tuple = ("PURSUING", None, None, None)
-            vel: pygame.math.Vector2 = intercept_direction(
-                pos, 
-                settings.FRIEND_SPEED, 
-                enemy_pos, 
-                enemy_dir
-            )
-            
-        else:
-            # Patrulhar: movimento circular ao redor do ponto de interesse
-            info = ("PATROLLING", None, None, None)
-            
-            r_vec = pos - settings.INTEREST_POINT_CENTER
-            current_distance: float = r_vec.length()
-            
-            if current_distance == 0:
-                r_vec = pygame.math.Vector2(patrol_radius, 0)
-                current_distance = patrol_radius
-                
-            # Calcular correção radial para manter órbita
-            radial_error: float = patrol_radius - current_distance
-            k_radial: float = 0.05
-            radial_correction = k_radial * radial_error * r_vec.normalize()
-            
-            # Velocidade tangencial (perpendicular ao raio)
-            tangent = pygame.math.Vector2(-r_vec.y, r_vec.x).normalize()
-            vel = tangent * settings.FRIEND_SPEED + radial_correction
+        # Cells where an enemy was seen recently enough.
+        targets = active_cells(enemy_intensity, self.enemy_activation_threshold_position)
+        if targets:
+            # Most urgent threat: the one closest to the interest point.
+            cell = min(targets, key=lambda c: cell_center(c).distance_to(settings.INTEREST_POINT_CENTER))
+            # The matrices store unit headings; enemies fly at ENEMY_SPEED.
+            enemy_velocity = pygame.math.Vector2(*enemy_direction[cell]) * settings.ENEMY_SPEED
+            vel = intercept_direction(pos, settings.FRIEND_SPEED, cell_center(cell), enemy_velocity)
+            return ("PURSUING", None, None, None), vel
 
-        return info, vel
+        vel = orbit_velocity(pos, self.patrol_radius, settings.FRIEND_SPEED, k_radial=0.05)
+        return ("PATROLLING", None, None, None), vel
 
 
 class FriendAEWBehavior(BaseBehavior):
-    """
-    Comportamento para drones AEW (Airborne Early Warning).
-    
-    Mantém órbita constante ao redor do ponto de interesse
-    no raio AEW_RANGE para detecção antecipada.
-    
-    Attributes:
-        friend_activation_threshold_position: Limiar de intensidade para detecção de amigos
-        enemy_activation_threshold_position: Limiar de intensidade para detecção de inimigos
-    """
-    
-    def __init__(
-        self,
-        friend_activation_threshold_position: float = 0.7,
-        enemy_activation_threshold_position: float = 0.4
-    ) -> None:
-        """
-        Inicializa comportamento AEW.
-        
-        Args:
-            friend_activation_threshold_position: Limiar para ativação de detecção de amigos
-            enemy_activation_threshold_position: Limiar para ativação de detecção de inimigos
-        """
-        super().__init__(behavior_type=BehaviorType.AEW)
-        self.friend_activation_threshold_position: float = friend_activation_threshold_position
-        self.enemy_activation_threshold_position: float = enemy_activation_threshold_position
+    """Airborne early warning: orbit the interest point at ``AEW_RANGE``.
 
-    def apply(self, state: dict, joystick_controlled: bool = False) -> Tuple[tuple, pygame.math.Vector2]:
-        """
-        Aplica comportamento de órbita AEW.
-        
-        Args:
-            state: Dicionário com estado do drone
-            joystick_controlled: Se drone está sob controle manual
-            
-        Returns:
-            Tupla (info, velocity)
-        """
-        pos = np.squeeze(state['pos'])
-        pos = pygame.math.Vector2(pos[0], pos[1])
-        friend_intensity = np.squeeze(state['friend_intensity'])
-        enemy_intensity = np.squeeze(state['enemy_intensity'])
-        friend_direction = np.squeeze(state['friend_direction'])
-        enemy_direction = np.squeeze(state['enemy_direction'])
-        
-        # Computar vetor radial a partir do ponto de interesse
-        r_vec = pos - settings.INTEREST_POINT_CENTER
-        current_distance: float = r_vec.length()
-        
-        if current_distance == 0:
-            r_vec = pygame.math.Vector2(settings.AEW_RANGE, 0)
-            current_distance = settings.AEW_RANGE
-            
-        # Calcular correção de órbita
-        radial_error: float = settings.AEW_RANGE - current_distance
-        k_radial: float = 0.05
-        radial_correction = k_radial * radial_error * r_vec.normalize()
-        
-        # Velocidade tangencial (perpendicular ao raio)
-        tangent = pygame.math.Vector2(-r_vec.y, r_vec.x).normalize()
-        vel: pygame.math.Vector2 = tangent * settings.AEW_SPEED
-        info: tuple = ("AEW", None, None, None)
-        
-        return info, vel
+    PT-BR: Alerta aéreo antecipado: orbita o ponto de interesse a ``AEW_RANGE``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(behavior_type=BehaviorType.AEW)
+
+    def apply(self, state: Dict[str, Any], joystick_controlled: bool = False) -> Tuple[Info, pygame.math.Vector2]:
+        pos = pygame.math.Vector2(*np.squeeze(state["pos"]).tolist())
+        return ("AEW", None, None, None), orbit_velocity(pos, settings.AEW_RANGE, settings.AEW_SPEED)
 
 
 class FriendRadarBehavior(BaseBehavior):
+    """Ground radar: never moves.
+
+    PT-BR: Radar terrestre: nunca se move.
     """
-    Comportamento para drones RADAR estacionários.
-    
-    Permanece fixo em sua posição inicial para fornecer
-    cobertura de detecção de longo alcance.
-    
-    Attributes:
-        friend_activation_threshold_position: Limiar de intensidade para detecção de amigos
-        enemy_activation_threshold_position: Limiar de intensidade para detecção de inimigos
-        type: Tipo do comportamento (RADAR)
-    """
-    
-    def __init__(
-        self,
-        friend_activation_threshold_position: float = 0.7,
-        enemy_activation_threshold_position: float = 0.4
-    ) -> None:
-        """
-        Inicializa comportamento RADAR.
-        
-        Args:
-            friend_activation_threshold_position: Limiar para ativação de detecção de amigos
-            enemy_activation_threshold_position: Limiar para ativação de detecção de inimigos
-        """
+
+    def __init__(self) -> None:
         super().__init__(behavior_type=BehaviorType.RADAR)
-        self.friend_activation_threshold_position: float = friend_activation_threshold_position
-        self.enemy_activation_threshold_position: float = enemy_activation_threshold_position
-        self.type = BehaviorType.RADAR
-        
-    def apply(self, state: dict, joystick_controlled: bool = False) -> Tuple[tuple, pygame.math.Vector2]:
-        """
-        Aplica comportamento RADAR (estacionário).
-        
-        Args:
-            state: Dicionário com estado do drone (não utilizado)
-            joystick_controlled: Se drone está sob controle manual (não utilizado)
-            
-        Returns:
-            Tupla (info, velocity) com velocidade zero
-        """
-        info: tuple = ("RADAR", None, None, None)
-        vel: pygame.math.Vector2 = pygame.math.Vector2(0, 0)
-        
-        return info, vel
+
+    def apply(self, state: Dict[str, Any], joystick_controlled: bool = False) -> Tuple[Info, pygame.math.Vector2]:
+        return ("RADAR", None, None, None), pygame.math.Vector2(0, 0)

@@ -1,110 +1,82 @@
+"""Run DroneSwarm2D episodes with the behaviours defined in ``behaviors.py``.
+
+PT-BR: Executa episódios do DroneSwarm2D com os comportamentos de ``behaviors.py``.
+
+Usage::
+
+    python src/main.py                         # full-screen window, 3 episodes
+    python src/main.py --windowed --episodes 5
+    python src/main.py --headless --episodes 20 --seed 7   # no window, fast
 """
-main.py
 
-Script principal para executar simulação DroneSwarm2D.
+import argparse
+from pathlib import Path
+from typing import Any, Dict, List
 
-Este módulo executa múltiplos episódios de simulação com
-comportamentos customizados e exibe estatísticas detalhadas.
-"""
-
-from typing import List, Dict, Any
 import DroneSwarm2D
 
-# Inicializar configurações
-settings = DroneSwarm2D.init(
-    config_path="./src/config.json",
-    fullscreen=True
-)
+CONFIG_PATH = Path(__file__).with_name("config.json")
 
-from behaviors import FriendCommonBehavior, FriendRadarBehavior, FriendAEWBehavior
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run DroneSwarm2D episodes.")
+    parser.add_argument("--episodes", type=int, default=3, help="number of episodes (default: 3)")
+    parser.add_argument("--seed", type=int, default=42, help="random seed (default: 42)")
+    parser.add_argument("--max-steps", type=int, default=5000, help="step limit per episode (default: 5000)")
+    parser.add_argument("--headless", action="store_true", help="run without a window, as fast as possible")
+    parser.add_argument("--windowed", action="store_true", help="use a window instead of full screen")
+    return parser.parse_args()
+
+
+def print_summary(results: List[Dict[str, Any]]) -> None:
+    """Print the averages over all episodes."""
+    n = len(results)
+    print("=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print(f"  Episodes:                  {n}")
+    print(f"  Mean reward:               {sum(r['accum_reward'] for r in results) / n:8.2f}")
+    print(f"  Mean enemies shot down:    {sum(r['enemies_shotdown'] for r in results) / n:6.2f}")
+    print(f"  Mean friends lost:         {sum(r['friends_shotdown'] for r in results) / n:6.2f}")
+    print(f"  Mean steps:                {sum(r['current_step'] for r in results) / n:6.2f}")
+    print(f"  Total successful attacks:  {sum(r['sucessful_attacks'] for r in results):4d}")
+    print("=" * 70)
 
 
 def main() -> None:
-    """
-    Executa simulação de enxame de drones.
-    
-    Realiza múltiplos episódios de simulação, coleta estatísticas
-    e exibe resultados agregados ao final.
-    """
-    print("=" * 70)
-    print("Simulação DroneSwarm2D")
-    print("=" * 70)
-    
-    # Criar ambiente de simulação
+    args = parse_args()
+
+    # 1. Load the configuration. This must happen before importing the behaviours.
+    settings = DroneSwarm2D.init(str(CONFIG_PATH), fullscreen=not args.windowed, headless=args.headless)
+    from behaviors import FriendAEWBehavior, FriendCommonBehavior, FriendRadarBehavior
+
+    # 2. Create the environment.
     env = DroneSwarm2D.AirTrafficEnv(
-        mode='human',
+        max_steps=args.max_steps,
+        mode=None if args.headless else "human",
         friend_behavior=FriendCommonBehavior(),
         friend_aew_behavior=FriendAEWBehavior(),
         friend_radar_behavior=FriendRadarBehavior(),
         enemy_behavior=settings.ENEMY_BEHAVIOR,
         demilitarized_zones=settings.DMZ,
-        seed=42
+        seed=args.seed,
     )
-    
-    print("✓ Ambiente criado com sucesso\n")
-    
-    # Configuração de episódios
-    NUM_EPISODES: int = 3
-    
-    print(f"Executando {NUM_EPISODES} episódios...\n")
-    
+
+    # 3. Run the episodes.
     results: List[Dict[str, Any]] = []
-    
-    for episode in range(NUM_EPISODES):
-        # Resetar ambiente
+    for episode in range(1, args.episodes + 1):
         obs, done = env.reset()
-        episode_reward: float = 0.0
-        
-        print(f"→ Episódio {episode + 1}/{NUM_EPISODES} iniciado...")
-        
-        # Loop principal do episódio
         while not done:
             obs, reward, done, info = env.step(None)
-            episode_reward += reward
-        
-        # Exibir estatísticas do episódio
-        print(f"  ✓ Finalizado!")
-        print(f"    - Steps: {info['current_step']:4d}")
-        print(f"    - Reward: {info['accum_reward']:8.2f}")
-        print(f"    - Inimigos abatidos: {info['enemies_shotdown']:2d}")
-        print(f"    - Ataques bem-sucedidos: {info['sucessful_attacks']:2d}")
-        print(f"    - IP Health: {info['interest_point_health']:3d}")
-        print()
-        
+
+        print(f"Episode {episode}/{args.episodes}: steps={info['current_step']:4d} "
+              f"reward={info['accum_reward']:9.2f} enemies_shot_down={info['enemies_shotdown']:2d} "
+              f"successful_attacks={info['sucessful_attacks']:2d} health={info['interest_point_health']:3d}")
         results.append(info)
-    
-    # Calcular e exibir estatísticas finais
-    _print_final_statistics(results)
-    
-    # Finalizar ambiente
+
+    # 4. Report and clean up.
+    print_summary(results)
     env.close()
-    print("\n✓ Simulação concluída com sucesso!")
-
-
-def _print_final_statistics(results: List[Dict[str, Any]]) -> None:
-    """
-    Imprime estatísticas agregadas dos episódios.
-    
-    Args:
-        results: Lista de dicionários info de cada episódio
-    """
-    print("=" * 70)
-    print("ESTATÍSTICAS FINAIS")
-    print("=" * 70)
-    
-    # Calcular médias
-    avg_reward: float = sum(r['accum_reward'] for r in results) / len(results)
-    avg_enemies: float = sum(r['enemies_shotdown'] for r in results) / len(results)
-    avg_steps: float = sum(r['current_step'] for r in results) / len(results)
-    total_attacks: int = sum(r['sucessful_attacks'] for r in results)
-    
-    # Exibir resultados
-    print(f"  Episódios executados:      {len(results)}")
-    print(f"  Reward médio:              {avg_reward:8.2f}")
-    print(f"  Inimigos abatidos (média): {avg_enemies:6.2f}")
-    print(f"  Steps médio:               {avg_steps:6.2f}")
-    print(f"  Total de ataques:          {total_attacks:4d}")
-    print("=" * 70)
 
 
 if __name__ == "__main__":

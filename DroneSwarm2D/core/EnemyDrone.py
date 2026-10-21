@@ -1,296 +1,235 @@
+"""Offensive ("enemy") drone and its attack patterns.
+
+PT-BR: Drone ofensivo ("inimigo") e seus padrões de ataque.
+
+Enemies spawn on a random border of the simulation area (after a random delay
+of up to 100 steps) and fly towards the interest point using one of the
+patterns listed in :data:`ENEMY_BEHAVIORS`. When a friendly drone gets within
+``ENEMY_DETECTION_RANGE`` the enemy either commits to a *desperate attack*
+(straight line, probability = its aggressiveness) or *escapes* for
+``ESCAPE_STEPS`` steps. Aggressiveness grows from ``INITIAL_AGGRESSIVENESS`` at
+``EXTERNAL_RADIUS`` to 1 at ``INITIAL_DISTANCE`` from the interest point.
 """
-EnemyDrone.py
 
-Define a classe EnemyDrone que representa drones ofensivos na simulação.
-
-O drone exibe diversos comportamentos (determinísticos e estocásticos) para
-se aproximar ou orbitar um ponto de interesse, mantendo-se dentro dos limites
-da simulação.
-
-Behaviors disponíveis:
-- direct: Movimento direto ao alvo
-- zigzag: Aproximação com oscilações
-- spiral: Movimento em espiral
-- alternating: Alternância entre direções
-- bounce_approach: Avanço e recuo
-- circle_wait_advance: Espera circular e avanço
-- formation/biformation: Movimentos em formação
-- joystick: Controle manual via joystick
-"""
+from __future__ import annotations
 
 import math
 import random
-from typing import Tuple, Optional
+import warnings
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pygame
 
+from .rendering import draw_dashed_circle, draw_fading_trajectory, get_font
 from .settings import (
-    ENEMY_SPEED,
+    ENEMY_COUNT,
     ENEMY_DETECTION_RANGE,
-    SIM_WIDTH,
-    SIM_HEIGHT,
+    ENEMY_SPEED,
     ESCAPE_STEPS,
+    EXTERNAL_RADIUS,
     INITIAL_AGGRESSIVENESS,
     INITIAL_DISTANCE,
-    EXTERNAL_RADIUS,
-    ENEMY_COUNT,
-    FONT_FAMILY,
+    SIM_HEIGHT,
+    SIM_WIDTH,
 )
-from .utils import draw_dashed_circle, load_svg_as_surface
+from .utils import load_svg_as_surface
 
-# Obter o diretório deste arquivo
-_MODULE_DIR = Path(__file__).parent
+_ASSETS_DIR = Path(__file__).parent.parent / "assets"
 
-# Construir caminhos absolutos para os assets
-_ASSETS_DIR = _MODULE_DIR.parent / "assets"  # DroneSwarm2D/assets/
+#: Patterns drawn at random when ``behavior_type`` is ``None``.
+RANDOM_ENEMY_BEHAVIORS: Tuple[str, ...] = (
+    "direct", "zigzag", "zigzag_damped", "zigzag_unstable", "zigzag_variable_period",
+    "spiral", "spiral_bounce", "spiral_oscillatory",
+    "alternating", "bounce_approach", "circle_wait_advance",
+)
+
+#: Every valid ``behavior_type`` (``ENEMY_BEHAVIOR`` in the configuration).
+ENEMY_BEHAVIORS: Tuple[str, ...] = RANDOM_ENEMY_BEHAVIORS + (
+    "formation", "biformation", "focal-direct", "debug", "u-debug", "joystick",
+)
+
+# Patterns that start immediately (no random spawn delay).
+_NO_START_DELAY = ("formation", "biformation", "focal-direct", "debug", "u-debug", "joystick")
 
 
 class EnemyDrone:
-    """
-    Representa um drone inimigo com diversos comportamentos de aproximação/órbita.
-    
-    O drone pode ter vários tipos de comportamento (ex: "direct", "zigzag", "spiral", etc.)
-    e recebe um identificador único. Atualiza sua posição baseado em sua velocidade e
-    permanece dentro da área de simulação.
-    
+    """An attacking drone.
+
+    PT-BR: Um drone atacante.
+
+    Args:
+        interest_point_center: Centre of the target.
+        position: Initial ``(x, y)``; a random border position if ``None``.
+        behavior_type: One of :data:`ENEMY_BEHAVIORS`; random pattern if ``None``.
+            Unknown names fall back to ``"direct"`` (with a warning).
+        fixed: Only used by the ``"u-debug"`` pattern (stay still).
+
     Attributes:
-        interest_point_center: Centro do ponto de interesse alvo
-        pos: Posição atual como Vector2
-        vel: Velocidade atual como Vector2
-        drone_id: Identificador único do drone
-        behavior_type: Tipo de comportamento atual
-        color: Cor RGB para renderização
-        joystick: Objeto joystick pygame (se aplicável)
-        detector: Posição do drone amigo que detectou este (ou None)
-        escape_steps_count: Contador de passos de fuga
-        desperate_attack: Flag para ataque desesperado
-        aggressiveness: Nível de agressividade (0-1+)
-        trajectory: Lista de posições históricas
-        
-    Class Attributes:
-        enemy_id_counter: Contador global para IDs únicos
-        class_seed: Seed compartilhada pela classe
-        class_rng: Random Number Generator da classe
-        class_np_rng: Numpy RNG da classe
+        pos, vel: Position and velocity (``pygame.math.Vector2``).
+        drone_id: Unique id within the episode.
+        behavior_type: Current pattern (formation patterns switch to ``"direct"``).
+        aggressiveness: Probability of attacking (instead of escaping) when detected.
+        detector: Position of the friend that detected it this step, or ``None``.
+        desperate_attack: Whether it committed to a straight-line attack.
+        info: Short label shown on screen.
     """
-    
+
     enemy_id_counter: int = 0
     original_drone_image: pygame.Surface = load_svg_as_surface(f"{_ASSETS_DIR}/drone_9.svg")
     original_drone_image_joystick: pygame.Surface = load_svg_as_surface(f"{_ASSETS_DIR}/drone_10.svg")
 
-    # Seed da classe - inicialmente None, será gerada se não definida explicitamente
     class_seed: Optional[int] = None
     class_rng: Optional[random.Random] = None
     class_np_rng: Optional[np.random.RandomState] = None
-    
-    def __init__(
-        self, 
-        interest_point_center: pygame.math.Vector2, 
-        position: Optional[Tuple[float, float]] = None, 
-        behavior_type: Optional[str] = None, 
-        fixed: bool = False
-    ) -> None:
-        """
-        Inicializa o drone inimigo com ponto alvo e comportamento.
 
-        Args:
-            interest_point_center: Centro do ponto de interesse alvo.
-            position: Posição inicial (x, y). Se None, usa posição aleatória na borda.
-            behavior_type: Tipo de comportamento (ex: "direct", "zigzag", etc.).
-                          Se None, um comportamento é escolhido aleatoriamente.
-            fixed: Se True, o drone permanece estacionário.
-        """
+    def __init__(
+        self,
+        interest_point_center: pygame.math.Vector2,
+        position: Optional[Tuple[float, float]] = None,
+        behavior_type: Optional[str] = None,
+        fixed: bool = False,
+    ) -> None:
         if EnemyDrone.class_seed is None:
             EnemyDrone.set_class_seed()
-            
+
         self.interest_point_center: pygame.math.Vector2 = interest_point_center
-        self.joystick: Optional[pygame.joystick.Joystick] = None
-        
-        # Definir posição inicial
+        self.joystick: Optional[pygame.joystick.JoystickType] = None
+
         if position is None:
             self.pos: pygame.math.Vector2 = self.random_border_position()
         else:
             self.pos = pygame.math.Vector2(position[0], position[1])
-                
-        # Inicializar velocidade direcionada ao ponto de interesse
-        target_vector: pygame.math.Vector2 = self.interest_point_center - self.pos
+
+        target_vector = self.interest_point_center - self.pos
         direction = target_vector.normalize() if target_vector.length() > 0 else pygame.math.Vector2(0, 0)
         self.vel: pygame.math.Vector2 = direction * ENEMY_SPEED
         self.info: str = ""
         self.aggressiveness: float = 0.0
-        
-        # Definir cor e atribuir ID único
+
         self.color: Tuple[int, int, int] = (255, 0, 0)
         self.drone_id: int = self._assign_id()
-        
-        # Atributos auxiliares para comportamentos específicos
+
+        # Auxiliary state of the oscillating patterns.
         self.phase: float = 0.0
         self.timer: int = 0
-        
-        # Atribuir tipo de comportamento
+
         if behavior_type is None:
-            self.behavior_type: str = EnemyDrone.class_rng.choice([
-                "direct", "zigzag", "zigzag_damped", "zigzag_unstable", "zigzag_variable_period",
-                "spiral", "spiral_bounce", "spiral_oscillatory",
-                "alternating", "bounce_approach", "circle_wait_advance"
-            ])
+            self.behavior_type: str = EnemyDrone.class_rng.choice(list(RANDOM_ENEMY_BEHAVIORS))
         else:
+            if behavior_type not in ENEMY_BEHAVIORS:
+                warnings.warn(f"Unknown enemy behaviour {behavior_type!r}; using 'direct'. "
+                              f"Valid values: {', '.join(ENEMY_BEHAVIORS)}.", RuntimeWarning, stacklevel=2)
             self.behavior_type = behavior_type
-            
+
         if behavior_type == "joystick":
             self._init_joystick()
 
-        # Atraso inicial (exceto para comportamentos especiais)
-        if not self.behavior_type in ["formation", "biformation", "focal-direct", "debug", "u-debug", "joystick"]:
+        if self.behavior_type not in _NO_START_DELAY:
             self.start_delay: int = EnemyDrone.class_rng.randint(0, 100)
         else:
             self.start_delay = 0
-            
+
         self.fixed: bool = fixed
-        self.trajectory: list[pygame.math.Vector2] = []
-        
-        # Configurar imagem do drone
-        if self.behavior_type == "joystick":
-            desired_width: int = int(SIM_WIDTH * 0.02)
-            aspect_ratio: float = self.original_drone_image_joystick.get_height() / self.original_drone_image_joystick.get_width()
-            desired_height: int = int(desired_width * aspect_ratio)
-            self.drone_image: pygame.Surface = pygame.transform.scale(
-                self.original_drone_image_joystick, 
-                (desired_width, desired_height)
-            )
-        else:
-            desired_width = int(SIM_WIDTH * 0.02)
-            aspect_ratio = self.original_drone_image.get_height() / self.original_drone_image.get_width()
-            desired_height = int(desired_width * aspect_ratio)
-            self.drone_image = pygame.transform.scale(
-                self.original_drone_image, 
-                (desired_width, desired_height)
-            )
-        
-        # Novos atributos para detecção e agressividade
-        self.detector: Optional[pygame.math.Vector2] = None  # Indica detecção por drones amigos
-        self.escape_steps: int = ESCAPE_STEPS  # Número de passos de fuga
-        self.escape_steps_count: int = 0  # Contador de passos de fuga
-        self.desperate_attack: bool = False  # Indica se está em ataque desesperado
-            
+        self.trajectory: List[pygame.math.Vector2] = []
+
+        source = self.original_drone_image_joystick if self.behavior_type == "joystick" else self.original_drone_image
+        desired_width = int(SIM_WIDTH * 0.02)
+        aspect_ratio = source.get_height() / source.get_width()
+        desired_size = (desired_width, int(desired_width * aspect_ratio))
+        self.drone_image: pygame.Surface = pygame.transform.scale(source, desired_size)
+
+        # Reaction to detection
+        self.detector: Optional[pygame.math.Vector2] = None
+        self.escape_steps: int = ESCAPE_STEPS
+        self.escape_steps_count: int = 0
+        self.desperate_attack: bool = False
+
+    # ------------------------------------------------------------------ class API
+
     @classmethod
     def set_class_seed(cls, seed: Optional[int] = None) -> None:
-        """
-        Define a seed compartilhada da classe para geração de números aleatórios.
-        
-        Args:
-            seed: Seed a ser usada. Se None, gera uma seed aleatória.
-            
-        Note:
-            Inicializa tanto random.Random quanto np.random.RandomState
+        """Seed the RNGs shared by all enemy drones (``None`` = random seed).
+
+        PT-BR: Define a semente dos geradores aleatórios dos inimigos.
         """
         cls.class_seed = seed if seed is not None else random.randint(0, 10000000)
         cls.class_rng = random.Random(cls.class_seed)
         cls.class_np_rng = np.random.RandomState(cls.class_seed)
-        
+
     def _init_joystick(self) -> None:
-        """
-        Inicializa controle por joystick se disponível.
-        
-        Note:
-            Imprime mensagem no console se joystick for conectado
-        """
         if pygame.joystick.get_count() > 0:
             self.joystick = pygame.joystick.Joystick(0)
             self.joystick.init()
-            print(f"Joystick '{self.joystick.get_name()}' conectado.")
+            print(f"Joystick '{self.joystick.get_name()}' connected.")
 
     def random_border_position(self) -> pygame.math.Vector2:
-        """
-        Gera uma posição inicial aleatória ao longo de uma das bordas da simulação.
-
-        Returns:
-            Vector2 com posição na borda (top, bottom, left ou right)
-        """
-        side: str = EnemyDrone.class_rng.choice(['top', 'bottom', 'left', 'right'])
-        if side == 'top':
-            return pygame.math.Vector2(EnemyDrone.class_rng.uniform(0, SIM_WIDTH), 0)
-        elif side == 'bottom':
-            return pygame.math.Vector2(EnemyDrone.class_rng.uniform(0, SIM_WIDTH), SIM_HEIGHT)
-        elif side == 'left':
-            return pygame.math.Vector2(0, EnemyDrone.class_rng.uniform(0, SIM_HEIGHT))
-        else:  # right
-            return pygame.math.Vector2(SIM_WIDTH, EnemyDrone.class_rng.uniform(0, SIM_HEIGHT))
+        """Random point on one of the four borders of the simulation area."""
+        rng = EnemyDrone.class_rng
+        side = rng.choice(["top", "bottom", "left", "right"])
+        if side == "top":
+            return pygame.math.Vector2(rng.uniform(0, SIM_WIDTH), 0)
+        if side == "bottom":
+            return pygame.math.Vector2(rng.uniform(0, SIM_WIDTH), SIM_HEIGHT)
+        if side == "left":
+            return pygame.math.Vector2(0, rng.uniform(0, SIM_HEIGHT))
+        return pygame.math.Vector2(SIM_WIDTH, rng.uniform(0, SIM_HEIGHT))
 
     def _assign_id(self) -> int:
-        """
-        Atribui um identificador único a este drone.
-
-        Returns:
-            ID único do drone
-        """
-        current_id: int = self.__class__.enemy_id_counter
+        current_id = EnemyDrone.enemy_id_counter
         EnemyDrone.enemy_id_counter += 1
         return current_id
-    
 
-    def update(self, detector: Optional[pygame.math.Vector2] = None) -> None: 
-        """
-        Atualiza a posição do drone baseado em seu comportamento e velocidade,
-        garantindo que permaneça dentro dos limites da simulação.
-        
-        O drone para de se mover quando atinge o ponto de interesse.
-        
+    # ------------------------------------------------------------------ update
+
+    def update(self, detector: Optional[pygame.math.Vector2] = None) -> None:
+        """Advance one step.
+
+        PT-BR: Avança um passo.
+
         Args:
-            detector: Posição de um drone amigo que detectou este drone.
-                     Se não None, pode ativar comportamento de fuga.
+            detector: Position of a friendly drone within ``ENEMY_DETECTION_RANGE``
+                (``None`` if the enemy is not being watched).
         """
         self.detector = detector
         self.timer += 1
 
-        # Aguardar pelo atraso inicial antes de mover
         if self.timer < self.start_delay:
             return
 
-        # Snap ao ponto de interesse se muito próximo
-        distance_to_interest: float = (self.interest_point_center - self.pos).length()
+        distance_to_interest = (self.interest_point_center - self.pos).length()
         if distance_to_interest < 1:
             self.pos = self.interest_point_center.copy()
             self.vel = pygame.math.Vector2(0, 0)
             return
 
-        # Calcular agressividade baseada na distância
         if distance_to_interest > INITIAL_DISTANCE:
             self.aggressiveness = max(
                 INITIAL_AGGRESSIVENESS,
-                1 + (distance_to_interest - INITIAL_DISTANCE) * 
-                ((INITIAL_AGGRESSIVENESS - 1) / (EXTERNAL_RADIUS - INITIAL_DISTANCE))
+                1 + (distance_to_interest - INITIAL_DISTANCE)
+                * ((INITIAL_AGGRESSIVENESS - 1) / (EXTERNAL_RADIUS - INITIAL_DISTANCE)),
             )
         else:
             self.aggressiveness = 1.0
-        
-        # Atualizar velocidade baseada no comportamento selecionado
+
         self.apply_behavior()
         self.pos += self.vel
-        
-        # Manter o drone dentro dos limites da simulação
         self._enforce_bounds()
-            
-        # Atualizar trajetória
+
         if len(self.trajectory) > 300:
             self.trajectory.pop(0)
         self.trajectory.append(self.pos.copy())
 
     def _enforce_bounds(self) -> None:
-        """
-        Garante que o drone permaneça dentro dos limites da simulação.
-        
-        Se uma borda for atingida, inverte o componente correspondente da velocidade.
-        """
+        """Keep the drone inside the simulation area, bouncing off the borders."""
         if self.pos.x < 0:
             self.pos.x = 0
             self.vel.x = abs(self.vel.x)
         elif self.pos.x > SIM_WIDTH:
             self.pos.x = SIM_WIDTH
             self.vel.x = -abs(self.vel.x)
-            
+
         if self.pos.y < 0:
             self.pos.y = 0
             self.vel.y = abs(self.vel.y)
@@ -299,45 +238,31 @@ class EnemyDrone:
             self.vel.y = -abs(self.vel.y)
 
     def apply_behavior(self) -> None:
-        """
-        Atualiza a velocidade do drone de acordo com seu comportamento escolhido,
-        combinando elementos determinísticos e estocásticos.
-        
-        Comportamentos disponíveis:
-        - Ataque desesperado: movimento direto ao ponto de interesse
-        - Fuga: afastamento do detector
-        - Comportamentos específicos: direct, zigzag, spiral, etc.
-        
-        Note:
-            A agressividade determina se o drone atacará ou fugirá quando detectado.
-        """
-        # Ataque desesperado: mover diretamente ao ponto de interesse
+        """Choose this step's velocity: attack, escape, or the configured pattern."""
         if self.desperate_attack:
             target_vector = self.interest_point_center - self.pos
-            self.vel = target_vector.normalize() * ENEMY_SPEED if target_vector.length() > 0 else pygame.math.Vector2(0, 0)
+            self.vel = (target_vector.normalize() * ENEMY_SPEED if target_vector.length() > 0
+                        else pygame.math.Vector2(0, 0))
             self.info = "DESPERATE ATTACK"
             return
 
-        # Comportamento de fuga: afastar-se do detector ou ponto de interesse
         if self.escape_steps_count > 0:
-            if self.detector is not None:
-                direction = (self.pos - self.detector).normalize()
-            else:
-                direction = (self.pos - self.interest_point_center).normalize()
-                
-            self.vel = direction * ENEMY_SPEED
+            away = self.pos - (self.detector if self.detector is not None else self.interest_point_center)
+            if away.length() == 0:
+                away = self.pos - self.interest_point_center
+            if away.length() > 0:
+                self.vel = away.normalize() * ENEMY_SPEED
             self.escape_steps_count += 1
             self.info = f"ESCAPE {self.escape_steps_count}/{self.escape_steps} STEPS"
-            
             if self.escape_steps_count >= self.escape_steps:
                 self.escape_steps_count = 0
                 self.detector = None
-                if self.behavior_type in ["formation", "biformation", "focal-direct"]:
+                if self.behavior_type in ("formation", "biformation", "focal-direct"):
                     self.behavior_type = "direct"
             return
 
-        # Agressividade: se detectado, decidir entre atacar ou fugir
-        if self.detector and self.behavior_type != 'joystick':
+        # Detected: attack with probability `aggressiveness`, otherwise start escaping.
+        if self.detector and self.behavior_type != "joystick":
             if EnemyDrone.class_np_rng.rand() < self.aggressiveness:
                 self.desperate_attack = True
                 self.info = "DESPERATE ATTACK"
@@ -345,108 +270,96 @@ class EnemyDrone:
                 self.escape_steps_count += 1
                 return
 
-        # Comportamento padrão: calcular vetor ao ponto de interesse
         target_vector = self.interest_point_center - self.pos
         if target_vector.length() == 0:
-            return  # Evitar divisão por zero
-        
+            return
+
         self.info = f"aggr.: {self.aggressiveness:.2f}"
 
-        # Aplicar comportamento específico
-        if self.behavior_type == "joystick":
+        behavior = self.behavior_type
+        if behavior == "joystick":
             self._behavior_joystick()
-        elif self.behavior_type == "direct":
+        elif behavior == "direct":
             self._behavior_direct(target_vector)
-        elif self.behavior_type.startswith("zigzag"):
+        elif behavior.startswith("zigzag"):
             self._behavior_zigzag(target_vector)
-        elif self.behavior_type.startswith("spiral"):
+        elif behavior.startswith("spiral"):
             self._behavior_spiral()
-        elif self.behavior_type == "alternating":
+        elif behavior == "alternating":
             self._behavior_alternating(target_vector)
-        elif self.behavior_type == "bounce_approach":
+        elif behavior == "bounce_approach":
             self._behavior_bounce_approach()
-        elif self.behavior_type == "circle_wait_advance":
+        elif behavior == "circle_wait_advance":
             self._behavior_circle_wait_advance()
-        elif self.behavior_type in ["formation", "biformation"]:
+        elif behavior in ("formation", "biformation"):
             self._behavior_formation()
-        elif self.behavior_type == "focal-direct":
+        elif behavior == "focal-direct":
             self._behavior_focal_direct()
-        elif self.behavior_type == "debug":
+        elif behavior == "debug":
             self._behavior_debug()
-        elif self.behavior_type == "u-debug":
+        elif behavior == "u-debug":
             self._behavior_u_debug(target_vector)
         else:
-            # Comportamento padrão: direto
             self._behavior_direct(target_vector)
 
-    def _behavior_joystick(self) -> None:
-        """Comportamento controlado por joystick."""
-        if self.joystick is not None:
-            x_axis = self.joystick.get_axis(0) 
-            y_axis = self.joystick.get_axis(1)
-            direction = pygame.math.Vector2(x_axis, y_axis)
-            
-            if direction.length() > 0.1:
-                direction = direction.normalize()
-            else:
-                direction = pygame.math.Vector2(0, 0)
-                
-            if self.detector is not None:
-                self.joystick.rumble(1, 0, 50)
-            else:
-                self.joystick.rumble(0, self.aggressiveness, 50)
+    # ------------------------------------------------------------------ patterns
+    # The auxiliary attributes of some patterns are created lazily on first use,
+    # which keeps the random-number stream identical to previous versions.
 
-            self.vel = direction * ENEMY_SPEED
-            self.info = "JOYSTICK"
-        else:
+    def _behavior_joystick(self) -> None:
+        """Manual control with a game pad (left stick)."""
+        if self.joystick is None:
             self.info = "NO JOYSTICK"
+            return
+        direction = pygame.math.Vector2(self.joystick.get_axis(0), self.joystick.get_axis(1))
+        direction = direction.normalize() if direction.length() > 0.1 else pygame.math.Vector2(0, 0)
+        if self.detector is not None:
+            self.joystick.rumble(1, 0, 50)
+        else:
+            self.joystick.rumble(0, self.aggressiveness, 50)
+        self.vel = direction * ENEMY_SPEED
+        self.info = "JOYSTICK"
 
     def _behavior_direct(self, target_vector: pygame.math.Vector2) -> None:
-        """Movimento direto ao ponto de interesse."""
+        """Straight line to the interest point."""
         self.vel = target_vector.normalize() * ENEMY_SPEED
 
     def _behavior_zigzag(self, target_vector: pygame.math.Vector2) -> None:
-        """Aproximação com oscilações senoidais."""
+        """Sinusoidal lateral oscillation (``zigzag``, ``_damped``, ``_unstable``, ``_variable_period``)."""
         base_direction = target_vector.normalize()
         self.phase += 0.1
         perp = pygame.math.Vector2(-base_direction.y, base_direction.x)
-        
+
         if self.behavior_type == "zigzag":
-            amplitude = 2.0
-            offset = math.sin(self.phase) * amplitude
+            offset = math.sin(self.phase) * 2.0
         elif self.behavior_type == "zigzag_damped":
-            decay_factor = math.exp(-0.01 * self.timer)
-            amplitude = 5.0 * decay_factor
-            offset = math.sin(self.phase) * amplitude
+            offset = math.sin(self.phase) * (5.0 * math.exp(-0.01 * self.timer))
         elif self.behavior_type == "zigzag_unstable":
             random_amplitude = EnemyDrone.class_rng.uniform(1.0, 10.0)
             random_frequency = EnemyDrone.class_rng.uniform(0.5, 2.0)
             offset = math.sin(random_frequency * self.timer) * random_amplitude
         else:  # zigzag_variable_period
-            base_frequency = 1.0
-            frequency_variation = 0.5 * math.sin(0.05 * self.timer)
-            effective_frequency = base_frequency + frequency_variation
-            amplitude = 6.0
-            offset = math.sin(effective_frequency * self.phase) * amplitude
-            
-        direction = (base_direction + perp * offset).normalize()
-        self.vel = direction * ENEMY_SPEED
+            effective_frequency = 1.0 + 0.5 * math.sin(0.05 * self.timer)
+            offset = math.sin(effective_frequency * self.phase) * 6.0
+
+        self.vel = (base_direction + perp * offset).normalize() * ENEMY_SPEED
 
     def _behavior_spiral(self) -> None:
-        """Movimento em espiral em direção ao ponto de interesse."""
+        """Spiral in (``spiral``), with periodic outward bounces (``spiral_bounce``)
+        or with an extra lateral oscillation (``spiral_oscillatory``)."""
         r_vector = self.pos - self.interest_point_center
         current_distance = r_vector.length()
         angle = math.atan2(r_vector.y, r_vector.x) + 0.1
-        
+
         if self.behavior_type == "spiral":
             new_radius = current_distance * 0.95
-        else:  # spiral_bounce ou spiral_oscillatory
-            if not hasattr(self, 'sb_state'):
+        else:
+            if not hasattr(self, "sb_state"):
                 self.sb_state = "spiral"
                 self.sb_timer = 0
                 self.spiral_duration = 60
                 self.bounce_duration = 30
-                
+
             if self.sb_state == "spiral":
                 new_radius = current_distance * 0.9
                 self.sb_timer += 1
@@ -454,52 +367,45 @@ class EnemyDrone:
                     self.sb_state = "bounce"
                     self.sb_timer = 0
                     self.bounce_deviation = EnemyDrone.class_rng.uniform(20, 50) * EnemyDrone.class_rng.choice([-1, 1])
-            else:  # bounce
-                direction = (-(self.interest_point_center - self.pos)).normalize()
-                direction = direction.rotate(self.bounce_deviation)
+            else:
+                direction = (-(self.interest_point_center - self.pos)).normalize().rotate(self.bounce_deviation)
                 self.sb_timer += 1
                 if self.sb_timer >= self.bounce_duration:
                     self.sb_state = "spiral"
                     self.sb_timer = 0
                 self.vel = direction * ENEMY_SPEED
                 return
-        
-        new_offset = pygame.math.Vector2(math.cos(angle), math.sin(angle)) * new_radius
-        desired_pos = self.interest_point_center + new_offset
-        direction = (desired_pos - self.pos)
-        
+
+        desired_pos = self.interest_point_center + pygame.math.Vector2(math.cos(angle), math.sin(angle)) * new_radius
+        direction = desired_pos - self.pos
+
         if self.behavior_type == "spiral_oscillatory" and direction.length() > 0:
             base_direction = direction.normalize()
             self.phase += 0.05
             perp = pygame.math.Vector2(-base_direction.y, base_direction.x)
-            offset = math.sin(self.phase)
-            direction = (base_direction + perp * offset).normalize() * direction.length()
-        
+            direction = (base_direction + perp * math.sin(self.phase)).normalize() * direction.length()
+
         self.vel = direction.normalize() * ENEMY_SPEED if direction.length() != 0 else pygame.math.Vector2(0, 0)
 
     def _behavior_alternating(self, target_vector: pygame.math.Vector2) -> None:
-        """Alterna entre aproximação direta e órbita perpendicular."""
+        """Alternate 50 steps straight in and 50 steps sideways (with noise)."""
         cycle_length = 100
-        phase_in_cycle = self.timer % cycle_length
         target_direction = target_vector.normalize()
-        
-        if phase_in_cycle < cycle_length / 2:
+        if self.timer % cycle_length < cycle_length / 2:
             direction = target_direction
         else:
             direction = pygame.math.Vector2(-target_direction.y, target_direction.x)
-            noise_angle = EnemyDrone.class_rng.uniform(-0.1, 0.1)
-            direction = direction.rotate_rad(noise_angle).normalize()
-        
+            direction = direction.rotate_rad(EnemyDrone.class_rng.uniform(-0.1, 0.1)).normalize()
         self.vel = direction * ENEMY_SPEED
 
     def _behavior_bounce_approach(self) -> None:
-        """Alterna entre aproximação e recuo com desvio."""
-        if not hasattr(self, 'state'):
+        """Approach for 60 steps, then retreat 30 steps with a random deviation."""
+        if not hasattr(self, "state"):
             self.state = "approach"
             self.state_timer = 0
             self.approach_duration = 60
             self.retreat_duration = 30
-            
+
         if self.state == "approach":
             direction = (self.interest_point_center - self.pos).normalize()
             self.state_timer += 1
@@ -507,67 +413,59 @@ class EnemyDrone:
                 self.state = "retreat"
                 self.state_timer = 0
                 self.deviation_angle = EnemyDrone.class_rng.uniform(20, 50) * EnemyDrone.class_rng.choice([-1, 1])
-            self.vel = direction * ENEMY_SPEED
-        else:  # retreat
-            direction = (-(self.interest_point_center - self.pos)).normalize()
-            direction = direction.rotate(self.deviation_angle)
+        else:
+            direction = (-(self.interest_point_center - self.pos)).normalize().rotate(self.deviation_angle)
             self.state_timer += 1
             if self.state_timer >= self.retreat_duration:
                 self.state = "approach"
                 self.state_timer = 0
-            self.vel = direction * ENEMY_SPEED
+        self.vel = direction * ENEMY_SPEED
 
     def _behavior_circle_wait_advance(self) -> None:
-        """Alterna entre espera (movimento circular) e avanço."""
-        if not hasattr(self, 'cw_state'):
+        """Circle in place for a random time, then advance for 60 steps."""
+        if not hasattr(self, "cw_state"):
             self.cw_state = "wait"
             self.cw_timer = 0
             self.wait_duration = EnemyDrone.class_rng.randint(40, 120)
             self.advance_duration = 60
             self.wait_turn_rate = 2
-            
+
         if self.cw_state == "wait":
             self.vel = self.vel.rotate(self.wait_turn_rate)
             self.cw_timer += 1
             if self.cw_timer >= self.wait_duration:
                 self.cw_state = "advance"
                 self.cw_timer = 0
-        else:  # advance
+        else:
             direction = (self.interest_point_center - self.pos).normalize()
-            offset_angle = EnemyDrone.class_rng.uniform(-5, 5)
-            direction = direction.rotate(offset_angle)
-            self.vel = direction * ENEMY_SPEED
+            self.vel = direction.rotate(EnemyDrone.class_rng.uniform(-5, 5)) * ENEMY_SPEED
             self.cw_timer += 1
             if self.cw_timer >= self.advance_duration:
                 self.cw_state = "wait"
                 self.cw_timer = 0
 
     def _behavior_formation(self) -> None:
-        """Movimento em formação (formation ou biformation)."""
-        if not hasattr(self, 'formation_id'):
+        """Rows of 5 drones entering from the right (``formation``) or from both sides
+        (``biformation``); switch to ``direct`` once inside ``INITIAL_DISTANCE``."""
+        if not hasattr(self, "formation_id"):
             self.formation_id = self.drone_id % ENEMY_COUNT
-            FRONT_FORMATION = 5
-            
+            front = 5
+
             if self.behavior_type == "formation":
-                row = self.formation_id // FRONT_FORMATION
-                column = self.formation_id % FRONT_FORMATION - FRONT_FORMATION // 2
+                row = self.formation_id // front
+                column = self.formation_id % front - front // 2
                 self.pos = pygame.math.Vector2(SIM_WIDTH, SIM_HEIGHT // 2 + column * 60)
                 self.start_delay = 40 * row
-            else:  # biformation
+            else:
                 if self.formation_id < ENEMY_COUNT // 2:
-                    formation_index = self.formation_id
-                    row = formation_index // FRONT_FORMATION
-                    column = formation_index % FRONT_FORMATION - FRONT_FORMATION // 2
-                    self.pos = pygame.math.Vector2(SIM_WIDTH, SIM_HEIGHT // 2 + column * 60)
-                    self.vel = pygame.math.Vector2(-1, 0)
-                    self.start_delay = 40 * row
+                    index, x, vel_x = self.formation_id, SIM_WIDTH, -1
                 else:
-                    formation_index = self.formation_id - (ENEMY_COUNT // 2)
-                    row = formation_index // FRONT_FORMATION
-                    column = formation_index % FRONT_FORMATION - FRONT_FORMATION // 2
-                    self.pos = pygame.math.Vector2(0, SIM_HEIGHT // 2 + column * 60)
-                    self.vel = pygame.math.Vector2(1, 0)
-                    self.start_delay = 40 * row
+                    index, x, vel_x = self.formation_id - ENEMY_COUNT // 2, 0, 1
+                row = index // front
+                column = index % front - front // 2
+                self.pos = pygame.math.Vector2(x, SIM_HEIGHT // 2 + column * 60)
+                self.vel = pygame.math.Vector2(vel_x, 0)
+                self.start_delay = 40 * row
 
         if self.pos.distance_to(self.interest_point_center) > INITIAL_DISTANCE:
             self.info = f"#{self.formation_id}"
@@ -575,121 +473,81 @@ class EnemyDrone:
             self.behavior_type = "direct"
 
     def _behavior_focal_direct(self) -> None:
-        """Comportamento focal-direct."""
+        """Every drone leaves from the top-right corner, one every 20 steps."""
         self.pos = pygame.math.Vector2(SIM_WIDTH, 0)
         self.start_delay = 20 * (self.drone_id % ENEMY_COUNT)
         self.behavior_type = "direct"
 
     def _behavior_debug(self) -> None:
-        """Comportamento de debug: movimento circular horário."""
-        if not hasattr(self, 'debug_orbit_radius'):
-            center_vec = pygame.math.Vector2(
-                self.interest_point_center.x if hasattr(self.interest_point_center, 'x') else self.interest_point_center[0],
-                self.interest_point_center.y if hasattr(self.interest_point_center, 'y') else self.interest_point_center[1]
-            )
-            self.debug_orbit_radius = self.pos.distance_to(center_vec)
+        """Clockwise orbit around the interest point (testing aid)."""
+        if not hasattr(self, "debug_orbit_radius"):
+            center = pygame.math.Vector2(self.interest_point_center[0], self.interest_point_center[1])
+            self.debug_orbit_radius = self.pos.distance_to(center)
             self.debug_angular_speed = 0.02
-        
-        center_x = self.interest_point_center.x if hasattr(self.interest_point_center, 'x') else self.interest_point_center[0]
-        center_y = self.interest_point_center.y if hasattr(self.interest_point_center, 'y') else self.interest_point_center[1]
-        
-        radius_vector = self.pos - pygame.math.Vector2(center_x, center_y)
+
+        radius_vector = self.pos - pygame.math.Vector2(self.interest_point_center[0], self.interest_point_center[1])
         tangent_vector = pygame.math.Vector2(radius_vector.y, -radius_vector.x)
-        
-        if tangent_vector.length() > 0:
-            direction = tangent_vector.normalize()
-            self.vel = direction * ENEMY_SPEED
-        else:
-            self.vel = pygame.math.Vector2(0, 0)
-        
+        self.vel = (tangent_vector.normalize() * ENEMY_SPEED if tangent_vector.length() > 0
+                    else pygame.math.Vector2(0, 0))
         self.info = "ORBIT"
 
     def _behavior_u_debug(self, target_vector: pygame.math.Vector2) -> None:
-        """Comportamento U-debug: avançar, perpendicular, recuar."""
-        if not hasattr(self, 'u_debug_phase'):
+        """Go in for 300 steps, sideways for 40, out for 300, then stop (testing aid)."""
+        if not hasattr(self, "u_debug_phase"):
             self.u_debug_phase = 0
             self.u_debug_timer = 0
             self.forward_steps = 300
             self.perp_steps = 40
 
-        target_direction = target_vector.normalize()
-        if not self.fixed:
-            if self.u_debug_phase == 0:
-                self.vel = target_direction * ENEMY_SPEED
-                self.u_debug_timer += 1
-                if self.u_debug_timer >= self.forward_steps:
-                    self.u_debug_phase = 1
-                    self.u_debug_timer = 0
-            elif self.u_debug_phase == 1:
-                perp_direction = pygame.math.Vector2(-target_direction.y, target_direction.x)
-                self.vel = perp_direction * ENEMY_SPEED
-                self.u_debug_timer += 1
-                if self.u_debug_timer >= self.perp_steps:
-                    self.u_debug_phase = 2
-                    self.u_debug_timer = 0
-            else:  # phase 2
-                self.vel = (-target_direction) * ENEMY_SPEED
-                self.u_debug_timer += 1
-                if self.u_debug_timer >= self.forward_steps:
-                    self.vel = pygame.math.Vector2(0, 0)
-        else:
+        if self.fixed:
             self.vel = pygame.math.Vector2(0, 0)
+            return
+
+        target_direction = target_vector.normalize()
+        if self.u_debug_phase == 0:
+            self.vel = target_direction * ENEMY_SPEED
+            self.u_debug_timer += 1
+            if self.u_debug_timer >= self.forward_steps:
+                self.u_debug_phase, self.u_debug_timer = 1, 0
+        elif self.u_debug_phase == 1:
+            self.vel = pygame.math.Vector2(-target_direction.y, target_direction.x) * ENEMY_SPEED
+            self.u_debug_timer += 1
+            if self.u_debug_timer >= self.perp_steps:
+                self.u_debug_phase, self.u_debug_timer = 2, 0
+        else:
+            self.vel = (-target_direction) * ENEMY_SPEED
+            self.u_debug_timer += 1
+            if self.u_debug_timer >= self.forward_steps:
+                self.vel = pygame.math.Vector2(0, 0)
+
+    # ------------------------------------------------------------------ drawing
 
     def draw(
-        self, 
-        surface: pygame.Surface, 
-        show_detection: bool = True, 
-        show_trajectory: bool = False, 
-        show_debug: bool = False
+        self,
+        surface: pygame.Surface,
+        show_detection: bool = True,
+        show_trajectory: bool = False,
+        show_debug: bool = False,
     ) -> None:
-        """
-        Desenha o drone inimigo na superfície fornecida.
+        """Draw the drone, its trajectory, detection range, id and debug label.
 
-        Args:
-            surface: Superfície pygame onde o drone será desenhado.
-            show_detection: Se True, exibe o alcance de detecção do drone.
-            show_trajectory: Se True, exibe a trajetória do drone.
-            show_debug: Se True, exibe informações de debug.
+        PT-BR: Desenha o drone, a trajetória, o alcance de detecção, o id e o rótulo.
         """
-        # Desenhar trajetória se habilitado
         if show_trajectory and len(self.trajectory) > 1:
-            traj_surf = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
-            decay_rate = 0.05
-            n = len(self.trajectory)
-            for i in range(n - 1):
-                d = n - 1 - i
-                alpha = int(255 * math.exp(-decay_rate * d))
-                alpha = max(alpha, 30)  # Mínimo de alpha
-                color_with_alpha = self.color + (alpha,)
-                start_pos = (int(self.trajectory[i].x), int(self.trajectory[i].y))
-                end_pos = (int(self.trajectory[i+1].x), int(self.trajectory[i+1].y))
-                pygame.draw.line(traj_surf, color_with_alpha, start_pos, end_pos, 2)
-            surface.blit(traj_surf, (0, 0))
-        
-        # Desenhar imagem do drone
-        image_rect = self.drone_image.get_rect(center=(int(self.pos.x), int(self.pos.y)))
-        surface.blit(self.drone_image, image_rect)
-        
-        # Opcionalmente desenhar alcance de detecção
+            draw_fading_trajectory(surface, self.trajectory, self.color, decay_rate=0.05)
+
+        center = (int(self.pos.x), int(self.pos.y))
+        surface.blit(self.drone_image, self.drone_image.get_rect(center=center))
+
         if show_detection:
-            draw_dashed_circle(
-                surface, 
-                (self.color[0], self.color[1], self.color[2], 64), 
-                (int(self.pos.x), int(self.pos.y)),
-                ENEMY_DETECTION_RANGE, 
-                dash_length=5, 
-                space_length=5, 
-                width=1
-            )
-        
-        # Renderizar ID do drone
-        font = pygame.font.SysFont(FONT_FAMILY, 10)
+            draw_dashed_circle(surface, (*self.color, 64), center, ENEMY_DETECTION_RANGE,
+                               dash_length=5, space_length=5, width=1)
+
+        font = get_font(10)
         label = font.render(f"ID: E{self.drone_id}", True, (255, 255, 255))
         label.set_alpha(128)
-        surface.blit(label, (int(self.pos.x) + 20, int(self.pos.y) - 20))
-        
-        # Informações de debug
+        surface.blit(label, (center[0] + 20, center[1] - 20))
+
         if show_debug:
-            len_info = len(self.info)
             debug_label = font.render(self.info, True, (255, 215, 0))
-            surface.blit(debug_label, (int(self.pos.x) - 3.5 * len_info, int(self.pos.y) + 25))
+            surface.blit(debug_label, (center[0] - 3.5 * len(self.info), center[1] + 25))
